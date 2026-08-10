@@ -63,6 +63,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Bağlantının kurulduğu an (epoch ms); ana ekrandaki süre sayacı okur. */
     val connectedSince: StateFlow<Long> = VpnState.connectedSince
 
+    /**
+     * Tünel açıkken uygulamalara gerçekten verilen DNS adresleri. Boşsa tünel
+     * kapalıdır ve ayarlar ekranı yalnızca "verilecek" önizlemeyi gösterir.
+     */
+    val activeDnsServers: StateFlow<List<String>> = VpnState.dnsServers
+
     // ---- canlı strateji testi ----
     private val _testResults = MutableStateFlow<List<StrategyTestResult>>(emptyList())
     val testResults: StateFlow<List<StrategyTestResult>> = _testResults.asStateFlow()

@@ -41,7 +41,14 @@ DPI motoru sıfırdan yazılmamıştır; kanıtlanmış açık kaynak bileşenle
   ping'liyi** seçer. Test canlı görünür (✓/✗ + ms).
 - **Manuel mod:** ISS + preset seçilebilir; "Gelişmiş" alanına serbest ByeDPI
   argümanı girilebilir.
-- **DoH zorunlu:** Cloudflare / AdGuard / Google (IP ile bootstrap → DNS hijack aşılır).
+- **DNS seçimi gerçekten uygulanır:** Cloudflare / AdGuard (filtresiz veya reklam
+  engelli) / Google — ya da kendi adresiniz. Özel alan üç biçimi de kabul eder: tam
+  DoH adresi, yalnızca alan adı (IP'si seçili sağlayıcının DoH'u ile çözülür) veya
+  düz IP. Seçim iki yere birden gider: uygulamanın kendi sorguları DoH ile (IP
+  bootstrap → DNS hijack aşılır), tünel açıkken cihazdaki uygulamalara da o
+  sağlayıcının adres çifti verilir. **Tünel açıkken yapılan değişiklik anında
+  uygulanır**, yeniden bağlanmak gerekmez. Ayarlar ekranı hangi adreslerin
+  verileceğini ve o an hangilerinin etkin olduğunu yazar.
 - **Uygulama ayırma (split tunneling):** Tümü / Yalnızca seçili / Seçili hariç.
 - **Quick Settings tile:** Hızlı Panel'e eklenir, tek dokunuşla bağlar/keser; servis
   ölmüşse yeniden başlatır. İkon beyaz/tek renk.
@@ -185,8 +192,12 @@ aktif alana sürükle → Bitti. Artık tek dokunuşla bağlanıp kesebilirsin.
   bırakma" ile UDP düşürülüp uygulamalar TCP'ye zorlanabilir (DNS/sesli görüşmeyi
   etkileyebilir — varsayılan kapalı).
 - **DNS notu:** DoH çözümlemesi otomatik strateji testinde ve sağlık kontrolünde
-  gerçek DoH (IP bootstrap) ile yapılır. Tünel içindeyken VPN DNS sunucusu seçili DoH
-  sağlayıcının IP'sine ayarlanır ve sorgular desync tüneli üzerinden gider.
+  gerçek DoH (IP bootstrap) ile yapılır. Cihazdaki diğer uygulamalar için tünel,
+  seçili sağlayıcının **iki** düz DNS adresini yazar (`addDnsServer`) ve sorgular
+  desync tüneli üzerinden gider. İkinci adres bilinçlidir: tek adres yazıldığında o
+  sunucuya ulaşılamadığı anda Android ağın kendi — yani ele geçirilmiş — sunucusuna
+  düşerdi. UDP'yi düşüren ayar açıksa DNS sorguları da düşer; bu yüzden varsayılan
+  kapalıdır.
 
 ## Lisans
 

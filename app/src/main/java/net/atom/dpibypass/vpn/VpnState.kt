@@ -23,6 +23,20 @@ object VpnState {
     private val _connectedSince = MutableStateFlow(0L)
     val connectedSince: StateFlow<Long> = _connectedSince.asStateFlow()
 
+    // Tünel kurulurken uygulamalara GERÇEKTEN verilen DNS adresleri ve okunur
+    // özeti. Ayarlar ekranı bunu gösterir: "seçtiğim DNS uygulanıyor mu?" sorusu
+    // tahminle değil, servisin bildirdiği değerle yanıtlanır.
+    private val _dnsServers = MutableStateFlow<List<String>>(emptyList())
+    val dnsServers: StateFlow<List<String>> = _dnsServers.asStateFlow()
+
+    private val _dnsLabel = MutableStateFlow("")
+    val dnsLabel: StateFlow<String> = _dnsLabel.asStateFlow()
+
+    fun updateDns(servers: List<String>, label: String) {
+        _dnsServers.value = servers
+        _dnsLabel.value = label
+    }
+
     fun update(state: ConnectionState) {
         applyState(state)
     }
@@ -39,6 +53,12 @@ object VpnState {
             if (_connectedSince.value == 0L) _connectedSince.value = System.currentTimeMillis()
         } else {
             _connectedSince.value = 0L
+            // Tünel yokken "etkin DNS" diye bir şey de yok; eski değer ekranda
+            // asılı kalmasın.
+            if (state == ConnectionState.Disconnected || state == ConnectionState.Failed) {
+                _dnsServers.value = emptyList()
+                _dnsLabel.value = ""
+            }
         }
         _state.value = state
     }

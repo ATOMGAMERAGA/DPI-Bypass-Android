@@ -3,7 +3,6 @@ package net.atom.dpibypass.vpn
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.net.InetAddresses
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
@@ -11,7 +10,11 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -24,6 +27,9 @@ import net.atom.dpibypass.data.OperationMode
 import net.atom.dpibypass.data.Settings
 import net.atom.dpibypass.data.SettingsRepository
 import net.atom.dpibypass.data.AppFilterMode
+import net.atom.dpibypass.dns.DnsPlan
+import net.atom.dpibypass.dns.DnsPlanner
+import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.dns.DohResolver
 import net.atom.dpibypass.engine.ByeDpiProxy
 import net.atom.dpibypass.engine.TProxyService
@@ -35,7 +41,6 @@ import net.atom.dpibypass.strategy.Socks5TestClient
 import net.atom.dpibypass.util.NotificationUtils
 import net.atom.dpibypass.util.shellSplit
 import java.io.File
-import java.net.URI
 
 /**
  * Ana tünel servisi:
@@ -53,13 +58,16 @@ class DpiVpnService : LifecycleVpnService() {
     private var byeDpiProxy = ByeDpiProxy()
     private var proxyJob: Job? = null
     private var watchdogJob: Job? = null
+    private var settingsJob: Job? = null
     private var tunFd: ParcelFileDescriptor? = null
     private val mutex = Mutex()
     private var stopping = false
 
     private var currentArgs: Array<String> = emptyArray()
     private var currentProfile: ActiveProfile? = null
-    private var currentDohUrl: String = net.atom.dpibypass.dns.DohProvider.Cloudflare.url
+    private var currentDohUrl: String = DohProvider.Cloudflare.url
+    /** O an gerçekten uygulanan DNS planı (bkz. [applyDnsPlan]). */
+    private var dnsPlan: DnsPlan? = null
     // Samsung kalıcı VPN durum göstergesi (ayarlardan). Tünel açıkken bildirim
     // kapatılamaz hale gelir; sistem çubuğundaki VPN göstergesi görünür kalır.
     private var persistentIndicator = false
@@ -101,7 +109,8 @@ class DpiVpnService : LifecycleVpnService() {
         try {
             val settings = settingsRepo.settings.first()
             persistentIndicator = settings.samsungVpnIndicator
-            currentDohUrl = settings.effectiveDohUrl()
+            // DNS planı strateji testinden ÖNCE kurulur: test de aynı DoH'u kullanır.
+            applyDnsPlan(settings)
             val plan = resolvePlan(settings)
             currentProfile = ActiveProfile(
                 plan.strategy.id,
@@ -124,7 +133,8 @@ class DpiVpnService : LifecycleVpnService() {
                 connected = true,
             )
             startWatchdog()
-            Log.i(TAG, "Bağlandı: ${currentProfile?.shortLabel()}")
+            startSettingsWatcher()
+            Log.i(TAG, "Bağlandı: ${currentProfile?.shortLabel()} · DNS=${dnsPlan?.servers}")
         } catch (e: Exception) {
             Log.e(TAG, "Başlatma başarısız", e)
             VpnState.update(ConnectionState.Failed, null)
@@ -136,6 +146,8 @@ class DpiVpnService : LifecycleVpnService() {
         Log.i(TAG, "Durduruluyor")
         watchdogJob?.cancel()
         watchdogJob = null
+        settingsJob?.cancel()
+        settingsJob = null
         mutex.withLock {
             stopping = true
             try {
@@ -150,6 +162,95 @@ class DpiVpnService : LifecycleVpnService() {
         VpnState.update(ConnectionState.Disconnected, null)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    // ---- DNS ----
+
+    /**
+     * Seçilen/yazılan DNS'i UYGULANABİLİR hâle getirir ve sakla.
+     *
+     * Ad çözümlemesi ağa çıkar, bu yüzden IO'da yapılır ve tünel kurulmadan ÖNCE
+     * bir kez çalışır: `buildTun` ana iş parçacığında çağrıldığı için orada ağ
+     * işi yapılamaz.
+     *
+     * Bootstrap bilinçli olarak SEÇİLİ SAĞLAYICININ DoH'u üzerinden yapılır:
+     * kullanıcının yazdığı ana bilgisayar adını sistem DNS'ine sormak, tam da
+     * kaçınmaya çalıştığımız ele geçirilmiş sunucuya sormak olurdu.
+     */
+    private suspend fun applyDnsPlan(settings: Settings): DnsPlan =
+        withContext(Dispatchers.IO) {
+            val plan = DnsPlanner.plan(
+                provider = settings.dohProvider,
+                customRaw = settings.customDohUrl,
+            ) { host, bootstrapDohUrl ->
+                DohResolver(bootstrapDohUrl).resolve(host)
+            }
+            dnsPlan = plan
+            currentDohUrl = plan.dohUrl
+            plan.warning?.let { Log.w(TAG, "DNS: $it") }
+            plan
+        }
+
+    /**
+     * Ayar değişikliklerini CANLI uygular.
+     *
+     * DNS sunucuları ve UDP kararı TUN'un kendi yapılandırmasındadır ve eskiden
+     * yalnızca bağlanma anında okunuyordu: kullanıcı DNS'i değiştirdiğinde bir
+     * sonraki bağlanmaya kadar hiçbir şey olmuyordu — "seçtiğim DNS etki etmiyor"
+     * şikâyetinin en görünür sebebi buydu. Artık değişiklik anında uygulanır;
+     * ByeDPI ayakta kalır, yalnızca TUN yeniden kurulur.
+     */
+    private fun startSettingsWatcher() {
+        settingsJob?.cancel()
+        settingsJob = lifecycleScope.launch {
+            settingsRepo.settings
+                .map { TunnelConfig(it.dohProvider.name, it.customDohUrl.trim(), it.disableQuic) }
+                .distinctUntilChanged()
+                // İlk değer zaten bağlanırken uygulandı.
+                .drop(1)
+                // Özel DNS alanı her tuş vuruşunda kaydedilir; her harfte TUN'u
+                // yeniden kurmak olmaz. collectLatest, yeni bir değer gelince
+                // bekleyen işi iptal eder — yani yazma bitene kadar sayaç başa
+                // döner, tünel yalnızca bir kez yeniden kurulur.
+                .collectLatest {
+                    delay(SETTINGS_SETTLE_MS)
+                    reconfigureTunnel()
+                }
+        }
+    }
+
+    /** TUN'u etkileyen ayarlar. Yalnızca bunlar değişince yeniden kurulur. */
+    private data class TunnelConfig(
+        val provider: String,
+        val customDoh: String,
+        val disableQuic: Boolean,
+    )
+
+    private suspend fun reconfigureTunnel() {
+        if (VpnState.state.value != ConnectionState.Connected) return
+        val settings = settingsRepo.settings.first()
+        applyDnsPlan(settings)
+        var failed = false
+        mutex.withLock {
+            if (stopping) return
+            try {
+                stopTun2Socks()
+                // Native tarafın kapanmayı bitirmesi için kısa bir nefes: aynı
+                // fd/kaynaklar hemen yeniden açılmasın.
+                delay(TUN_RESTART_GAP_MS)
+                startTun2Socks(settings)
+                Log.i(TAG, "Tünel yeniden yapılandırıldı · DNS=${dnsPlan?.servers}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Yeniden yapılandırma başarısız", e)
+                failed = true
+            }
+        }
+        if (failed) {
+            VpnState.update(ConnectionState.Failed, null)
+            // stop() bu izleyici işi iptal eder; kendi içinden çağrılırsa
+            // temizlik yarıda kalırdı. Ayrı bir coroutine'de çalıştırılır.
+            lifecycleScope.launch { stop() }
+        }
     }
 
     // ---- strateji seçimi ----
@@ -202,7 +303,9 @@ class DpiVpnService : LifecycleVpnService() {
         val ispName = isp.displayName
         val networkKey = IspDetector.networkKey(transport, isp)
 
-        val doh = DohResolver(settings.effectiveDohUrl())
+        // `currentDohUrl` applyDnsPlan tarafından zaten normalleştirildi (özel
+        // alana çıplak IP yazılmış olabilir); ham ayarı tekrar ayrıştırmayız.
+        val doh = DohResolver(currentDohUrl)
         val tester = StrategyTester(lifecycleScope, doh)
         val hosts = StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings)
 
@@ -291,10 +394,14 @@ class DpiVpnService : LifecycleVpnService() {
             writeText(config)
         }
 
-        val fd = buildTun(settings).establish()
+        val applied = mutableListOf<String>()
+        val fd = buildTun(settings, applied).establish()
             ?: throw IllegalStateException("VPN establish() null döndü")
         tunFd = fd
         TProxyService.TProxyStartService(configFile.absolutePath, fd.fd)
+        // Arayüze ancak TUN gerçekten kurulduktan sonra "etkin" denir; niyet ile
+        // sonucu ayırmak, "seçtim ama olmadı" durumunun görünmesini sağlar.
+        VpnState.updateDns(applied, dnsPlan?.label.orEmpty())
     }
 
     private fun stopTun2Socks() {
@@ -307,16 +414,33 @@ class DpiVpnService : LifecycleVpnService() {
         tunFd = null
     }
 
-    private fun buildTun(settings: Settings): Builder {
+    /** [appliedDns], gerçekten kabul edilen DNS adresleriyle doldurulur. */
+    private fun buildTun(settings: Settings, appliedDns: MutableList<String>): Builder {
         val builder = Builder()
         builder.setSession(getString(R.string.app_name))
         builder.addAddress("10.10.10.10", 32)
         builder.addRoute("0.0.0.0", 0)
 
-        // DoH sağlayıcısının IP'sini DNS sunucusu olarak ver; sorgu ISS'in hijack
-        // ettiği yerel DNS yerine bu sunucuya, desync tüneli üzerinden gider.
-        val dnsIp = dohServerIp(settings.effectiveDohUrl())
-        builder.addDnsServer(dnsIp)
+        // Seçilen DNS'in adresleri uygulamalara BURADA verilir; sorgu ISS'in
+        // hijack ettiği yerel DNS yerine bu sunuculara, desync tüneli üzerinden
+        // gider. Liste `dnsPlan`den gelir: kullanıcı özel bir adres yazdıysa o,
+        // yazmadıysa seçili sağlayıcının adres çifti (bkz. applyDnsPlan).
+        val servers = dnsPlan?.servers?.takeIf { it.isNotEmpty() } ?: listOf(DEFAULT_DNS)
+        servers.forEach { ip ->
+            try {
+                builder.addDnsServer(ip)
+                appliedDns += ip
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "DNS adresi kabul edilmedi: $ip (${e.message})")
+            }
+        }
+        // Hiçbiri kabul edilmediyse tünel DNS'siz kalır ve uygulamalar ağın kendi
+        // (ele geçirilmiş olabilecek) sunucusuna döner — bu sessizce olmamalı.
+        if (appliedDns.isEmpty()) {
+            Log.w(TAG, "Geçerli DNS adresi yok; $DEFAULT_DNS kullanılıyor")
+            builder.addDnsServer(DEFAULT_DNS)
+            appliedDns += DEFAULT_DNS
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
@@ -357,22 +481,6 @@ class DpiVpnService : LifecycleVpnService() {
             Log.w(TAG, "Uygulama bulunamadı: $pkg")
         }
     }
-
-    private fun dohServerIp(url: String): String {
-        return try {
-            val host = URI(url).host ?: return DEFAULT_DNS
-            if (isNumericAddress(host)) host else DEFAULT_DNS
-        } catch (e: Exception) {
-            DEFAULT_DNS
-        }
-    }
-
-    private fun isNumericAddress(host: String): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            InetAddresses.isNumericAddress(host)
-        } else {
-            host.matches(Regex("^[0-9.]+$")) || host.contains(":")
-        }
 
     // ---- watchdog ----
 
@@ -461,6 +569,16 @@ class DpiVpnService : LifecycleVpnService() {
         const val PROXY_PORT = 1080
         private const val DEFAULT_DNS = "1.1.1.1"
         private const val HEALTH_CHECK_INTERVAL_MS = 60_000L
+
+        /**
+         * Ayar değişikliğinden sonra tünelin yeniden kurulması için beklenen süre.
+         * Özel DNS alanına yazarken her tuş vuruşu bir kayıt üretir; bu pencere
+         * yazmanın bitmesini bekler.
+         */
+        private const val SETTINGS_SETTLE_MS = 1200L
+
+        /** TUN kapanışı ile yeniden açılışı arasındaki emniyet payı. */
+        private const val TUN_RESTART_GAP_MS = 150L
 
         /**
          * Strateji yarışının üst sınırı. Dolduğunda o ana kadarki EN İYİSİ ile
