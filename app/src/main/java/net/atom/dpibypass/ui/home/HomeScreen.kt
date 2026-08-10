@@ -368,8 +368,9 @@ fun HomeScreen(
                     )
                     RowDivider()
                     ListRow(
-                        title = "DNS, DoH ile şifreli çözülür",
-                        subtitle = "Sağlayıcının DNS yönlendirmesi (hijack) devre dışı kalır.",
+                        title = "DNS seçtiğiniz sunucuya gider",
+                        subtitle = "Tünel açıkken uygulamalara Ayarlar'da seçtiğiniz DNS verilir; " +
+                            "uygulamanın kendi sorguları DoH ile şifreli çözülür.",
                         icon = Icons.Rounded.Dns,
                     )
                     RowDivider()

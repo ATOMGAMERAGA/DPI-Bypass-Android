@@ -11,6 +11,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import net.atom.dpibypass.dns.DnsPlan
+import net.atom.dpibypass.dns.DnsPlanner
 import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.isp.Isp
 import net.atom.dpibypass.util.DeviceInfo
@@ -42,9 +44,21 @@ data class Settings(
     // (bildirim kalıcı/kapatılamaz). Yalnızca Samsung'da ayarlarda görünür.
     val samsungVpnIndicator: Boolean = false,
 ) {
-    /** Etkin DoH endpoint URL'i (özel varsa o, yoksa seçili sağlayıcı). */
-    fun effectiveDohUrl(): String =
-        customDohUrl.trim().ifBlank { dohProvider.url }
+    /**
+     * Etkin DoH endpoint URL'i (özel varsa o, yoksa seçili sağlayıcı).
+     *
+     * Ayrıştırma [DnsPlanner]'a bırakılır: özel alana çıplak bir IP ("9.9.9.9")
+     * ya da yolsuz bir ad ("dns.adguard.com") yazıldığında eskiden buradan
+     * doğrudan o metin dönüyor ve hiçbir DoH sorgusu çözülemiyordu.
+     */
+    fun effectiveDohUrl(): String = DnsPlanner.dohUrl(dohProvider, customDohUrl)
+
+    /**
+     * Ağ erişimi olmadan hesaplanan DNS planı — arayüz "hangi DNS gerçekten
+     * uygulanacak" sorusunu bununla yanıtlar. Bağlanırken servis aynı planı ad
+     * çözümleyicisiyle birlikte yeniden hesaplar.
+     */
+    fun dnsPreview(): DnsPlan = DnsPlanner.plan(dohProvider, customDohUrl)
 }
 
 /**

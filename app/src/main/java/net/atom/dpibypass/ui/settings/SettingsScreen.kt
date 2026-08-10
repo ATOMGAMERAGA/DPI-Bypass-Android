@@ -52,6 +52,7 @@ import kotlinx.coroutines.delay
 import net.atom.dpibypass.BuildConfig
 import net.atom.dpibypass.R
 import net.atom.dpibypass.data.ThemePref
+import net.atom.dpibypass.dns.DnsPlan
 import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.ui.AppViewModel
 import net.atom.dpibypass.ui.design.AppButton
@@ -86,6 +87,7 @@ import net.atom.dpibypass.util.NotificationUtils
 @Composable
 fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val activeDns by viewModel.activeDnsServers.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dohPickerOpen by remember { mutableStateOf(false) }
 
@@ -156,7 +158,8 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
             RowDivider()
             SwitchRow(
                 title = "UDP/QUIC'i tünelde düşür",
-                subtitle = "Kapalı tutun. Açarsanız Discord'da sesli sohbet çalışmaz; yalnızca " +
+                subtitle = "Kapalı tutun. Açarsanız Discord'da sesli sohbet çalışmaz ve " +
+                    "seçtiğiniz DNS'e ulaşılamaz (DNS sorguları da UDP'dir); yalnızca " +
                     "QUIC yüzünden takılan nadir durumlar için vardır.",
                 icon = Icons.Rounded.Block,
                 checked = settings.disableQuic,
@@ -165,10 +168,10 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
         }
 
         // ---- DNS ----
-        SectionHeader("DNS (DoH)")
+        SectionHeader("DNS")
         AppCard(modifier = Modifier.fillMaxWidth()) {
             ListRow(
-                title = "DoH sağlayıcı",
+                title = "DNS sağlayıcı",
                 subtitle = settings.dohProvider.displayName,
                 icon = Icons.Rounded.Dns,
                 onClick = { dohPickerOpen = true },
@@ -183,8 +186,11 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
             RowDivider()
             Column(Modifier.padding(18.dp)) {
                 Text(
-                    text = "Sağlayıcılar düz DNS'i ele geçirir; DoH sunucusuna IP ile bağlanılarak " +
-                        "bu yönlendirme aşılır. İsterseniz kendi DoH adresinizi yazın.",
+                    text = "Seçtiğiniz sunucu iki yere birden uygulanır: uygulamanın kendi " +
+                        "sorguları DoH ile (HTTPS üzerinden, IP'ye doğrudan bağlanarak) çözülür, " +
+                        "tünel açıldığında da cihazdaki uygulamalara bu sunucunun adresleri " +
+                        "verilir. Aşağıya kendi adresinizi yazabilirsiniz: tam DoH adresi " +
+                        "(https://…/dns-query), yalnızca alan adı ya da düz IP.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -192,7 +198,14 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
                 AppTextField(
                     value = settings.customDohUrl,
                     onValueChange = viewModel::setCustomDohUrl,
-                    placeholder = "https://1.1.1.1/dns-query",
+                    placeholder = "https://1.1.1.1/dns-query · dns.adguard.com · 9.9.9.9",
+                )
+                VSpace(12.dp)
+                DnsEffectNote(
+                    preview = remember(settings.dohProvider, settings.customDohUrl) {
+                        settings.dnsPreview()
+                    },
+                    active = activeDns,
                 )
             }
         }
@@ -316,7 +329,8 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
             Column(Modifier.padding(18.dp)) {
                 Text(
                     text = "Bu araç kişisel ve yasal erişim içindir. Trafiğinizi ŞİFRELEMEZ, IP'nizi " +
-                        "gizlemez; yalnızca DPI'ın SNI/Host okumasını bozar ve DNS'i DoH ile çözer.",
+                        "gizlemez; yalnızca DPI'ın SNI/Host okumasını bozar ve DNS sorgularını " +
+                        "seçtiğiniz sunucuya yönlendirir.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -349,12 +363,63 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
 
     if (dohPickerOpen) {
         ChoiceDialog(
-            title = "DoH sağlayıcı",
+            title = "DNS sağlayıcı",
             options = DohProvider.entries.map { it to it.displayName },
             selected = settings.dohProvider,
             onSelect = viewModel::setDohProvider,
             onDismiss = { dohPickerOpen = false },
         )
+    }
+}
+
+/**
+ * "Seçtiğim DNS gerçekten uygulanıyor mu?" — bu sorunun tek satırlık, tahminsiz
+ * yanıtı.
+ *
+ * [preview] ayarlardan hesaplanan plandır (ağ gerektirmez); [active] ise servisin
+ * tünel kurulurken GERÇEKTEN yazdığı adreslerdir. İkisini ayrı göstermek bilinçli:
+ * kullanıcı bir ayarı değiştirdiğinde ne olacağını da, o an ne olduğunu da görür.
+ * Yazılan adres uygulanamıyorsa (geçersiz ya da çözülemiyor) sebebi burada söylenir
+ * — eskiden sessizce Cloudflare'a düşülüyordu.
+ */
+@Composable
+private fun DnsEffectNote(preview: DnsPlan, active: List<String>) {
+    val scheme = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        preview.warning?.let { warning ->
+            Text(
+                text = warning,
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.error,
+            )
+        }
+        Text(
+            text = if (preview.pendingHost != null) {
+                // Ad çözümü ağ ister; burada yapılmaz. "Çözülemedi" demek yanlış
+                // olurdu — henüz bakılmadı.
+                "Uygulamalara verilecek: ${preview.pendingHost} adresinin IP'si " +
+                    "(bağlanırken çözülür, olmazsa ${preview.servers.joinToString(", ")})"
+            } else {
+                "Uygulamalara verilecek: ${preview.servers.joinToString(", ")}"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant,
+        )
+        if (active.isNotEmpty()) {
+            Text(
+                text = if (active == preview.servers || preview.pendingHost != null) {
+                    // pendingHost varsa beklenen adresler burada bilinemez; "farklı"
+                    // demek yanlış olurdu.
+                    "Şu an etkin: ${active.joinToString(", ")}"
+                } else {
+                    // Tünel açıkken yapılan değişiklik saniyeler içinde uygulanır;
+                    // bu satır o aradaki farkı gizlemez.
+                    "Şu an etkin: ${active.joinToString(", ")} · yeni ayar birazdan uygulanacak"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.primary,
+            )
+        }
     }
 }
 

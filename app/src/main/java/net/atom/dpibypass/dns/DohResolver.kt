@@ -15,11 +15,49 @@ import java.util.concurrent.TimeUnit
  * hijack edilen sistem DNS'ine bağımlı kalmayız. IP literaline yapılan TLS'te
  * SNI gönderilmediği için DPI SNI-filtreleyemez.
  */
-enum class DohProvider(val displayName: String, val url: String) {
-    Cloudflare("Cloudflare", "https://1.1.1.1/dns-query"),
-    AdGuard("AdGuard", "https://94.140.14.14/dns-query"),
-    AdGuardAds("AdGuard (reklam engelli)", "https://94.140.15.15/dns-query"),
-    Google("Google", "https://8.8.8.8/dns-query");
+enum class DohProvider(
+    val displayName: String,
+    val url: String,
+    /**
+     * Aynı sağlayıcının DÜZ DNS adresleri. Tünel kurulurken uygulamalara bunlar
+     * verilir (`VpnService.Builder.addDnsServer`).
+     *
+     * İki adres verilir çünkü tek adres yazıldığında o sunucuya erişilemediği anda
+     * Android bir sonraki DNS'e — yani ağın kendi (ele geçirilmiş) sunucusuna —
+     * düşer. İkinci adres aynı sağlayıcıdan olduğu için seçim korunur.
+     *
+     * Eskiden bu liste yoktu; adres DoH URL'inden ayrıştırılıyordu ve URL'de
+     * ana bilgisayar adı (IP değil) geçtiği anda sessizce 1.1.1.1'e düşülüyordu.
+     * Kullanıcının "seçtiğim DNS etki etmiyor" demesinin sebeplerinden biri buydu.
+     */
+    val dnsServers: List<String>,
+) {
+    Cloudflare(
+        "Cloudflare",
+        "https://1.1.1.1/dns-query",
+        listOf("1.1.1.1", "1.0.0.1"),
+    ),
+
+    // AdGuard'ın filtresiz çifti. (Eskiden bu girdiye 94.140.14.14 yazılıydı; o
+    // adres AdGuard'ın REKLAM ENGELLEYEN çiftidir — etiket ile davranış
+    // birbirini tutmuyordu.)
+    AdGuard(
+        "AdGuard (filtresiz)",
+        "https://94.140.14.140/dns-query",
+        listOf("94.140.14.140", "94.140.14.141"),
+    ),
+
+    AdGuardAds(
+        "AdGuard (reklam engelli)",
+        "https://94.140.14.14/dns-query",
+        listOf("94.140.14.14", "94.140.15.15"),
+    ),
+
+    Google(
+        "Google",
+        "https://8.8.8.8/dns-query",
+        listOf("8.8.8.8", "8.8.4.4"),
+    );
 
     companion object {
         fun fromName(name: String?): DohProvider =
