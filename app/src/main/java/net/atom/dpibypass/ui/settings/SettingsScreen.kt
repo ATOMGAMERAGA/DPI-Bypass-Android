@@ -163,7 +163,7 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
                 subtitle = when {
                     vodafoneActive -> "Etkin: tüm telefon uygulamalarının IPv4 çıkışı TTL 65 ile gönderiliyor."
                     settings.vodafoneUnlimitedMode -> "Açık: DPI bağlantısı kurulunca etkinleşir. Vodafone hotspot'una bağlanan telefonda kullanın."
-                    else -> "Vodafone hotspot'una bağlanan rootsuz telefonda paylaşım TTL'ini düzeltir. DPI bağlantısı gerekir; uygulama seçimi bu modu sınırlamaz.",
+                    else -> "Vodafone hotspot'una bağlanan rootsuz telefonda paylaşım TTL'ini düzeltir. DPI bağlantısı gerekir; uygulama seçimi bu modu sınırlamaz."
                 },
                 icon = Icons.Rounded.WifiTethering,
                 checked = settings.vodafoneUnlimitedMode,
