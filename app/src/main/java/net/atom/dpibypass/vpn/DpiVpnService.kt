@@ -339,7 +339,7 @@ class DpiVpnService : LifecycleVpnService() {
         // `currentDohUrl` applyDnsPlan tarafından zaten normalleştirildi (özel
         // alana çıplak IP yazılmış olabilir); ham ayarı tekrar ayrıştırmayız.
         val doh = DohResolver(currentDohUrl)
-        val tester = StrategyTester(lifecycleScope, doh)
+        val tester = StrategyTester(lifecycleScope, doh, settings.vodafoneUnlimitedMode)
         val hosts = StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings)
 
         // --- 1. aşama: hatırlanan kazananı doğrula ---

@@ -169,7 +169,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val s = settings.value
                 val doh = DohResolver(s.effectiveDohUrl())
-                val tester = StrategyTester(viewModelScope, doh)
+                val tester = StrategyTester(viewModelScope, doh, s.vodafoneUnlimitedMode)
                 val detector = IspDetector(getApplication<Application>())
                 // Testin sıralaması da gerçek ağa göre yapılır: ev Wi-Fi'ında
                 // SIM operatörünün stratejileriyle başlamak zaman kaybıdır.

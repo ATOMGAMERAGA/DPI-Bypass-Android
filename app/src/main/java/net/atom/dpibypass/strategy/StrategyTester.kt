@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.atom.dpibypass.dns.DohResolver
 import net.atom.dpibypass.engine.ByeDpiProxy
+import net.atom.dpibypass.vpn.VodafoneModePolicy
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -56,6 +57,7 @@ data class StrategyTestResult(
 class StrategyTester(
     private val scope: CoroutineScope,
     private val doh: DohResolver,
+    private val vodafoneMode: Boolean = false,
 ) {
     private val _results = MutableStateFlow<List<StrategyTestResult>>(emptyList())
     val results: StateFlow<List<StrategyTestResult>> = _results.asStateFlow()
@@ -173,7 +175,8 @@ class StrategyTester(
         var job: Job? = null
         return try {
             job = scope.launch(Dispatchers.IO) {
-                val code = proxy.startProxy(strategy.toArgv(port))
+                val args = VodafoneModePolicy.proxyArgs(strategy.toArgv(port), vodafoneMode)
+                val code = proxy.startProxy(args)
                 if (code != 0) Log.d(TAG, "${strategy.id} proxy çıkış kodu: $code")
             }
 

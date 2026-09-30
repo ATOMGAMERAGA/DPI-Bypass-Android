@@ -38,7 +38,26 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Birim testleri
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --stacktrace --console=plain 2>&1 | tee gradle-test.log
+
+      - name: Test hatasını kontrol kayıtlarına ekle
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('gradle-test.log')
+          if path.exists():
+              lines = path.read_text(errors='replace').splitlines()
+              pattern = re.compile(r'(^e:|error:|^FAILURE:|What went wrong:|Execution failed|> Task .*FAILED|Caused by:)')
+              highlights = [line for line in lines if pattern.search(line)][-30:]
+              excerpt = '\n'.join(highlights + ['--- log sonu ---'] + lines[-35:])
+              escaped = excerpt.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error title=Gradle test diagnosis::{escaped}')
+          PY
 
       - name: Lint
         run: ./gradlew lintDebug --stacktrace

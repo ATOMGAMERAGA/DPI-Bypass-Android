@@ -56,9 +56,11 @@ import net.atom.dpibypass.ui.design.DockSpacing
 import net.atom.dpibypass.ui.design.IconBubble
 import net.atom.dpibypass.ui.design.ListRow
 import net.atom.dpibypass.ui.design.LocalChrome
+import net.atom.dpibypass.ui.design.LocalTabletLayout
 import net.atom.dpibypass.ui.design.PublishScroll
 import net.atom.dpibypass.ui.design.RowDivider
 import net.atom.dpibypass.ui.design.ScreenPadding
+import net.atom.dpibypass.ui.design.TabletContentMaxWidth
 import net.atom.dpibypass.ui.design.SectionHeader
 import net.atom.dpibypass.ui.design.StatTile
 import net.atom.dpibypass.ui.design.TagBadge
@@ -110,6 +112,7 @@ fun HomeScreen(
     val scroll = rememberScrollState()
     PublishScroll(scroll)
     val chrome = LocalChrome.current
+    val tablet = LocalTabletLayout.current
     val brandFadePx = with(LocalDensity.current) { 56.dp.toPx() }
     val entranceState = rememberEntrance()
     val entrance = { entranceState.value }
@@ -138,12 +141,12 @@ fun HomeScreen(
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             Column(
                 modifier = Modifier
+                    .widthIn(max = if (tablet) TabletContentMaxWidth else ContentMaxWidth)
                     .fillMaxWidth()
-                    .widthIn(max = ContentMaxWidth)
                     .verticalScroll(scroll)
                     .padding(padding)
                     .padding(horizontal = ScreenPadding)
-                    .padding(bottom = DockSpacing),
+                    .padding(bottom = if (tablet) 32.dp else DockSpacing),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 VSpace(46.dp)
