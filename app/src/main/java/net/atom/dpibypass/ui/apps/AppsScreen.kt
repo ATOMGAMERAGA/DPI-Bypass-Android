@@ -58,6 +58,8 @@ import net.atom.dpibypass.ui.design.AppCard
 import net.atom.dpibypass.ui.design.AppScaffold
 import net.atom.dpibypass.ui.design.AppTextField
 import net.atom.dpibypass.ui.design.ContentMaxWidth
+import net.atom.dpibypass.ui.design.TabletContentMaxWidth
+import net.atom.dpibypass.ui.design.LocalTabletLayout
 import net.atom.dpibypass.ui.design.DockSpacing
 import net.atom.dpibypass.ui.design.PageHeader
 import net.atom.dpibypass.ui.design.PublishScroll
@@ -91,6 +93,7 @@ private val FAVORITES = setOf(
 
 @Composable
 fun AppsScreen(viewModel: AppViewModel) {
+    val tablet = LocalTabletLayout.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val apps by viewModel.apps.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
@@ -122,13 +125,13 @@ fun AppsScreen(viewModel: AppViewModel) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = ContentMaxWidth),
+                    .widthIn(max = if (tablet) TabletContentMaxWidth else ContentMaxWidth)
+                    .fillMaxWidth(),
                 contentPadding = PaddingValues(
                     top = padding.calculateTopPadding(),
                     start = ScreenPadding,
                     end = ScreenPadding,
-                    bottom = DockSpacing,
+                    bottom = if (tablet) 32.dp else DockSpacing,
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -149,6 +152,25 @@ fun AppsScreen(viewModel: AppViewModel) {
                         selected = settings.appFilterMode,
                         onSelect = viewModel::setAppFilterMode,
                     )
+                }
+
+                if (settings.vodafoneUnlimitedMode) {
+                    item(key = "vodafone-scope") {
+                        AppCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(18.dp)) {
+                                Text(
+                                    text = "Vodafone Sınırsız Modu açık",
+                                    style = MaterialTheme.typography.titleMedium,
+                                )
+                                Text(
+                                    text = "DPI bağlıyken bu mod tüm telefon uygulamalarını kapsar. " +
+                                        "Buradaki seçimlerin saklanır; modu kapatınca yeniden uygulanır.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
 
                 if (!listEnabled) {

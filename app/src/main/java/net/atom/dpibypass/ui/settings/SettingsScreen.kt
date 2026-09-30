@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.Vibration
+import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -88,6 +89,7 @@ import net.atom.dpibypass.util.NotificationUtils
 fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val activeDns by viewModel.activeDnsServers.collectAsStateWithLifecycle()
+    val vodafoneActive by viewModel.vodafoneModeActive.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dohPickerOpen by remember { mutableStateOf(false) }
 
@@ -154,6 +156,18 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
                 icon = Icons.Rounded.PowerSettingsNew,
                 checked = settings.autoConnectOnBoot,
                 onCheckedChange = viewModel::setAutoConnectOnBoot,
+            )
+            RowDivider()
+            SwitchRow(
+                title = "Vodafone Sınırsız Modu",
+                subtitle = when {
+                    vodafoneActive -> "Etkin: tüm telefon uygulamalarının IPv4 çıkışı TTL 65 ile gönderiliyor."
+                    settings.vodafoneUnlimitedMode -> "Açık: DPI bağlantısı kurulunca etkinleşir. Vodafone hotspot'una bağlanan telefonda kullanın."
+                    else -> "Vodafone hotspot'una bağlanan rootsuz telefonda paylaşım TTL'ini düzeltir. DPI bağlantısı gerekir; uygulama seçimi bu modu sınırlamaz.",
+                },
+                icon = Icons.Rounded.WifiTethering,
+                checked = settings.vodafoneUnlimitedMode,
+                onCheckedChange = viewModel::setVodafoneUnlimitedMode,
             )
             RowDivider()
             SwitchRow(

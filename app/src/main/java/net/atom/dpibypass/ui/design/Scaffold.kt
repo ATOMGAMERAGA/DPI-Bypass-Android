@@ -68,6 +68,7 @@ val DockSpacing: Dp = 118.dp
 
 /** İçerik kolonunun büyük ekranlarda genişlemesini sınırlar (okunabilirlik). */
 val ContentMaxWidth: Dp = 640.dp
+val TabletContentMaxWidth: Dp = 760.dp
 
 val ScreenPadding: Dp = 18.dp
 
@@ -89,6 +90,7 @@ class ChromeState {
 }
 
 val LocalChrome = staticCompositionLocalOf { ChromeState() }
+val LocalTabletLayout = staticCompositionLocalOf { false }
 
 /**
  * Kaydırma konumunu kabuğa bağlar. Kompozisyon tetiklemez (snapshotFlow).
@@ -234,6 +236,7 @@ fun AppScreen(
     actions: @Composable RowScope.() -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val tablet = LocalTabletLayout.current
     val scroll = rememberScrollState()
     PublishScroll(scroll)
 
@@ -241,12 +244,12 @@ fun AppScreen(
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             Column(
                 modifier = Modifier
+                    .widthIn(max = if (tablet) TabletContentMaxWidth else ContentMaxWidth)
                     .fillMaxWidth()
-                    .widthIn(max = ContentMaxWidth)
                     .verticalScroll(scroll)
                     .padding(padding)
                     .padding(horizontal = ScreenPadding)
-                    .padding(bottom = DockSpacing),
+                    .padding(bottom = if (tablet) 32.dp else DockSpacing),
             ) {
                 PageHeader(title = title, subtitle = subtitle)
                 content()

@@ -9,10 +9,10 @@ import android.util.Log
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -64,6 +64,9 @@ class DpiVpnService : LifecycleVpnService() {
     private var stopping = false
 
     private var currentArgs: Array<String> = emptyArray()
+    private var currentBaseArgs: Array<String> = emptyArray()
+    private var currentVodafoneMode = false
+    private var appliedConfig: TunnelConfig? = null
     private var currentProfile: ActiveProfile? = null
     private var currentDohUrl: String = DohProvider.Cloudflare.url
     /** O an gerçekten uygulanan DNS planı (bkz. [applyDnsPlan]). */
@@ -118,15 +121,19 @@ class DpiVpnService : LifecycleVpnService() {
                 plan.ispName,
                 plan.latencyMs?.toInt(),
             )
-            currentArgs = plan.strategy.toArgv(PROXY_PORT)
+            currentBaseArgs = plan.strategy.toArgv(PROXY_PORT)
+            currentVodafoneMode = settings.vodafoneUnlimitedMode
+            currentArgs = VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode)
 
             mutex.withLock {
                 VpnState.update(ConnectionState.Connecting)
                 startProxy(currentArgs)
                 startTun2Socks(settings)
+                appliedConfig = TunnelConfig.from(settings)
             }
 
             VpnState.update(ConnectionState.Connected, currentProfile)
+            VpnState.updateVodafoneMode(currentVodafoneMode)
             connectedSince = System.currentTimeMillis()
             goForeground(
                 getString(R.string.notification_connected, currentProfile!!.shortLabel()),
@@ -160,6 +167,7 @@ class DpiVpnService : LifecycleVpnService() {
             }
         }
         VpnState.update(ConnectionState.Disconnected, null)
+        appliedConfig = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -198,23 +206,24 @@ class DpiVpnService : LifecycleVpnService() {
      * yalnızca bağlanma anında okunuyordu: kullanıcı DNS'i değiştirdiğinde bir
      * sonraki bağlanmaya kadar hiçbir şey olmuyordu — "seçtiğim DNS etki etmiyor"
      * şikâyetinin en görünür sebebi buydu. Artık değişiklik anında uygulanır;
-     * ByeDPI ayakta kalır, yalnızca TUN yeniden kurulur.
+     * Vodafone modu değişirse proxy de yeni TTL ile yeniden kurulur.
      */
     private fun startSettingsWatcher() {
         settingsJob?.cancel()
         settingsJob = lifecycleScope.launch {
             settingsRepo.settings
-                .map { TunnelConfig(it.dohProvider.name, it.customDohUrl.trim(), it.disableQuic) }
+                .map(TunnelConfig::from)
                 .distinctUntilChanged()
-                // İlk değer zaten bağlanırken uygulandı.
-                .drop(1)
                 // Özel DNS alanı her tuş vuruşunda kaydedilir; her harfte TUN'u
                 // yeniden kurmak olmaz. collectLatest, yeni bir değer gelince
                 // bekleyen işi iptal eder — yani yazma bitene kadar sayaç başa
                 // döner, tünel yalnızca bir kez yeniden kurulur.
-                .collectLatest {
+                .collectLatest { config ->
+                    if (config == appliedConfig) return@collectLatest
                     delay(SETTINGS_SETTLE_MS)
-                    reconfigureTunnel()
+                    // Yeni bir ayar gelince bekleme iptal edilir; yeniden kurulum
+                    // başladıktan sonra yarıda bırakılırsa tünel kapanık kalır.
+                    withContext(NonCancellable) { reconfigureTunnel() }
                 }
         }
     }
@@ -224,7 +233,21 @@ class DpiVpnService : LifecycleVpnService() {
         val provider: String,
         val customDoh: String,
         val disableQuic: Boolean,
-    )
+        val vodafoneMode: Boolean,
+        val appFilterMode: AppFilterMode,
+        val selectedApps: Set<String>,
+    ) {
+        companion object {
+            fun from(settings: Settings) = TunnelConfig(
+                settings.dohProvider.name,
+                settings.customDohUrl.trim(),
+                settings.disableQuic,
+                settings.vodafoneUnlimitedMode,
+                settings.appFilterMode,
+                settings.selectedApps,
+            )
+        }
+    }
 
     private suspend fun reconfigureTunnel() {
         if (VpnState.state.value != ConnectionState.Connected) return
@@ -234,11 +257,21 @@ class DpiVpnService : LifecycleVpnService() {
         mutex.withLock {
             if (stopping) return
             try {
+                val modeChanged = currentVodafoneMode != settings.vodafoneUnlimitedMode
+                VpnState.updateVodafoneMode(false)
                 stopTun2Socks()
                 // Native tarafın kapanmayı bitirmesi için kısa bir nefes: aynı
                 // fd/kaynaklar hemen yeniden açılmasın.
                 delay(TUN_RESTART_GAP_MS)
+                if (modeChanged) {
+                    stopProxy()
+                    currentVodafoneMode = settings.vodafoneUnlimitedMode
+                    currentArgs = VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode)
+                    startProxy(currentArgs)
+                }
                 startTun2Socks(settings)
+                appliedConfig = TunnelConfig.from(settings)
+                VpnState.updateVodafoneMode(currentVodafoneMode)
                 Log.i(TAG, "Tünel yeniden yapılandırıldı · DNS=${dnsPlan?.servers}")
             } catch (e: Exception) {
                 Log.e(TAG, "Yeniden yapılandırma başarısız", e)
@@ -420,6 +453,12 @@ class DpiVpnService : LifecycleVpnService() {
         builder.setSession(getString(R.string.app_name))
         builder.addAddress("10.10.10.10", 32)
         builder.addRoute("0.0.0.0", 0)
+        if (VodafoneModePolicy.captureIpv6(settings.vodafoneUnlimitedMode)) {
+            // IPv6 hotspot'ta ikinci bir kaynak adresi gösterebilir. Tam rota
+            // TUN'a girer; ByeDPI -X ile genel IPv6 çıkışını reddeder.
+            builder.addAddress("fd00:10:10::10", 128)
+            builder.addRoute("::", 0)
+        }
 
         // Seçilen DNS'in adresleri uygulamalara BURADA verilir; sorgu ISS'in
         // hijack ettiği yerel DNS yerine bu sunuculara, desync tüneli üzerinden
@@ -453,7 +492,7 @@ class DpiVpnService : LifecycleVpnService() {
     /** Uygulama ayırma (split tunneling). Kendi paketini daima hariç tut (döngü olmasın). */
     private fun applySplitTunneling(builder: Builder, settings: Settings) {
         val self = applicationContext.packageName
-        when (settings.appFilterMode) {
+        when (VodafoneModePolicy.filterMode(settings.appFilterMode, settings.vodafoneUnlimitedMode)) {
             AppFilterMode.All -> {
                 safeDisallow(builder, self)
             }

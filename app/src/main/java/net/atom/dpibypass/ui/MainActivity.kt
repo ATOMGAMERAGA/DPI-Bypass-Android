@@ -19,6 +19,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -39,11 +40,13 @@ import net.atom.dpibypass.ui.design.AmbientBackground
 import net.atom.dpibypass.ui.design.ChromeState
 import net.atom.dpibypass.ui.design.LocalChrome
 import net.atom.dpibypass.ui.design.LocalHapticsEnabled
+import net.atom.dpibypass.ui.design.LocalTabletLayout
 import net.atom.dpibypass.ui.design.connectionColor
 import net.atom.dpibypass.ui.theme.Motion
 import net.atom.dpibypass.ui.home.HomeScreen
 import net.atom.dpibypass.ui.mode.ModeScreen
 import net.atom.dpibypass.ui.nav.BottomDock
+import net.atom.dpibypass.ui.nav.TabletRail
 import net.atom.dpibypass.ui.nav.Dest
 import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
 import net.atom.dpibypass.ui.settings.SettingsScreen
@@ -167,22 +170,32 @@ private fun AppRoot(
 
     // Zemin, bağlantı durumunun rengini alır: uygulama bir bütün olarak durum
     // değiştirir, sadece bir düğme değil.
-    CompositionLocalProvider(LocalChrome provides chrome) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val tablet = maxWidth >= 600.dp
+        CompositionLocalProvider(
+            LocalChrome provides chrome,
+            LocalTabletLayout provides tablet,
+        ) {
         AmbientBackground(
             accent = connectionColor(connectionState),
             modifier = Modifier.fillMaxSize(),
             overlay = {
                 // Dock ve sihirbaz, arka plan KAYDININ DIŞINDA durur: kendini
                 // içeren bir katmanı bulanıklaştıran cam olamaz (bkz. Glass.kt).
-                BottomDock(
-                    navController = navController,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        // Jest çubuğu ya da tuşlu navigasyon — dock her cihazda
-                        // güvenli alanın üstünde yüzer.
-                        .navigationBarsPadding()
-                        .padding(bottom = 14.dp),
-                )
+                if (tablet) {
+                    TabletRail(
+                        navController = navController,
+                        modifier = Modifier.align(Alignment.CenterStart),
+                    )
+                } else {
+                    BottomDock(
+                        navController = navController,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(bottom = 14.dp),
+                    )
+                }
 
                 // İlk açılış kurulum sihirbazı — her şeyin üstüne biner.
                 if (!settings.onboardingDone) {
@@ -200,6 +213,7 @@ private fun AppRoot(
             NavHost(
                 navController = navController,
                 startDestination = Dest.Home.route,
+                modifier = if (tablet) Modifier.padding(start = 88.dp) else Modifier,
                 enterTransition = { enter },
                 exitTransition = { exit },
                 popEnterTransition = { enter },
@@ -223,6 +237,7 @@ private fun AppRoot(
                 composable(Dest.Apps.route) { AppsScreen(viewModel) }
                 composable(Dest.Settings.route) { SettingsScreen(viewModel, onRequestTile = onRequestTile) }
             }
+        }
         }
     }
 }

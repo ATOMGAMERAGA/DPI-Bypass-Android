@@ -32,6 +32,7 @@ data class Settings(
     val appFilterMode: AppFilterMode = AppFilterMode.All,
     val selectedApps: Set<String> = emptySet(),
     val autoConnectOnBoot: Boolean = false,
+    val vodafoneUnlimitedMode: Boolean = false,
     val theme: ThemePref = ThemePref.System,
     val haptics: Boolean = true,
     // Opt-in: UDP'yi (QUIC/HTTP-3 dahil) tünelde bırakma; varsayılan kapalı ki
@@ -96,6 +97,7 @@ class SettingsRepository(private val context: Context) {
         appFilterMode = AppFilterMode.fromName(this[Keys.APP_FILTER_MODE]),
         selectedApps = this[Keys.SELECTED_APPS] ?: emptySet(),
         autoConnectOnBoot = this[Keys.AUTO_CONNECT_BOOT] ?: false,
+        vodafoneUnlimitedMode = this[Keys.VODAFONE_UNLIMITED_MODE] ?: false,
         theme = ThemePref.fromName(this[Keys.THEME]),
         haptics = this[Keys.HAPTICS] ?: true,
         // Varsayılan KAPALI: UDP tünelde kalır ki DNS ve Discord sesli sohbeti
@@ -120,6 +122,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSelectedApps(apps: Set<String>) =
         context.dataStore.edit { it[Keys.SELECTED_APPS] = apps }
     suspend fun setAutoConnectOnBoot(v: Boolean) = put(Keys.AUTO_CONNECT_BOOT, v)
+    suspend fun setVodafoneUnlimitedMode(v: Boolean) = put(Keys.VODAFONE_UNLIMITED_MODE, v)
     suspend fun setTheme(t: ThemePref) = put(Keys.THEME, t.name)
     suspend fun setHaptics(v: Boolean) = put(Keys.HAPTICS, v)
     suspend fun setDisableQuic(v: Boolean) = put(Keys.DISABLE_QUIC, v)
@@ -184,6 +187,7 @@ class SettingsRepository(private val context: Context) {
         val APP_FILTER_MODE = stringPreferencesKey("app_filter_mode")
         val SELECTED_APPS = stringSetPreferencesKey("selected_apps")
         val AUTO_CONNECT_BOOT = booleanPreferencesKey("auto_connect_boot")
+        val VODAFONE_UNLIMITED_MODE = booleanPreferencesKey("vodafone_unlimited_mode")
         val THEME = stringPreferencesKey("theme")
         val HAPTICS = booleanPreferencesKey("haptics")
         val DISABLE_QUIC = booleanPreferencesKey("disable_quic")

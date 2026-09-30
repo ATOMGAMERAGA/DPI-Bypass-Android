@@ -32,6 +32,13 @@ object VpnState {
     private val _dnsLabel = MutableStateFlow("")
     val dnsLabel: StateFlow<String> = _dnsLabel.asStateFlow()
 
+    private val _vodafoneModeActive = MutableStateFlow(false)
+    val vodafoneModeActive: StateFlow<Boolean> = _vodafoneModeActive.asStateFlow()
+
+    fun updateVodafoneMode(active: Boolean) {
+        _vodafoneModeActive.value = active
+    }
+
     fun updateDns(servers: List<String>, label: String) {
         _dnsServers.value = servers
         _dnsLabel.value = label
@@ -58,6 +65,7 @@ object VpnState {
             if (state == ConnectionState.Disconnected || state == ConnectionState.Failed) {
                 _dnsServers.value = emptyList()
                 _dnsLabel.value = ""
+                _vodafoneModeActive.value = false
             }
         }
         _state.value = state

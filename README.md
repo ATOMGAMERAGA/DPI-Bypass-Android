@@ -1,205 +1,68 @@
-# DPI Bypass
+# DPI Bypass · Android
 
-Türkiye'deki ISS'lerin (Türk Telekom, Turkcell/Superonline, Vodafone) **DPI (Deep
-Packet Inspection)** ve **DNS hijacking** ile kısıtladığı Discord gibi meşru
-servislere erişimi, **kullanıcının kendi cihazından çıkan kendi trafiğini** yerelde
-yeniden düzenleyerek (paket parçalama / desync + şifresiz DNS'i DoH ile değiştirme)
-açan bir Android uygulaması.
+Telefonunda Discord ve benzeri erişimi kısıtlanan servislere bağlanmak için açık kaynak bir uygulama. Bağlantıyı **telefonun üzerinde** işler: DNS sorguları ve bağlantının ilk paketleri üzerinde çalışır; trafiğini başka ülkedeki bir sunucuya göndermez.
 
-> **Bu araç kişisel, yasal erişim amaçlıdır. Trafiğinizi ŞİFRELEMEZ.** Uzak sunucuya
-> trafik göndermez, VPN gibi IP gizlemez. Sadece DPI'ın SNI/Host okumasını bozar ve
-> DNS'i DoH ile çözer. GoodbyeDPI / ByeDPI / SplitWire-Turkey ile aynı meşru,
-> açık kaynak anti-sansür yaklaşımıdır. Gizlilik/anonimlik gerekiyorsa VPN ayrı bir konudur.
+> **Kısa açıklama:** Android, yerel trafik işleme için VPN izni gösterir. DPI Bypass bu izni telefonunda bir ağ tüneli açmak için kullanır. IP adresini gizleyen veya trafiğini şifreleyen bir uzak VPN hizmeti değildir. Erişim sonucu operatöre, ağa ve zamana göre değişebilir.
 
-## Mimari (kanıtlanmış yığın)
+## İndir ve kullan
 
-```
-[Uygulamalar]  ──(tüm TCP/UDP)──►  Android VpnService ──► TUN (tun0)
-     │
-     ▼
-hev-socks5-tunnel (native)  ── TUN paketlerini SOCKS5'e çevirir ── 127.0.0.1:1080
-     │
-     ▼
-ByeDPI / ciadpi (native)  ── SOCKS5 proxy + DPI desync (--split/--disorder/--fake/--oob/--tlsrec/--auto)
-     │
-     ▼
-[İnternet]  (gerçek hedef sunucu — trafik yerelde işlenir, dışarı proxy YOK)
-```
+1. [Son sürüm sayfasını aç](https://github.com/ATOMGAMERAGA/DPI-Bypass-DC/releases/latest) ve **Assets** altındaki APK dosyasını telefonuna indir. Günlük kullanım için `app-debug` adlı CI test dosyasını değil, yayımlanan sürümü seç.
+2. İndirilen APK'yı açıp kur. Android dış kaynaktan kurulum izni isterse, dosyayı açtığın uygulamaya izin ver. Uyarıların metni telefon üreticisine göre değişebilir.
+3. **DPI Bypass** uygulamasını aç. İlk kurulum adımlarını tamamla ve ana ekrandaki büyük bağlan düğmesine dokun.
+4. Android'in VPN bağlantısı onayını kabul et. Ekranda **Bağlandı** durumunu gördüğünde kullanmak istediğin uygulamayı yeniden açıp dene.
 
-DPI motoru sıfırdan yazılmamıştır; kanıtlanmış açık kaynak bileşenler kullanılır
-(bkz. `NOTICE`). Native katman `git submodule` olarak eklidir:
+Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildirimdeki kapatma eylemini kullanabilirsin. İstersen **Ayarlar → Hızlı erişim** üzerinden Hızlı Panel'e tek dokunuşluk kısayol ekleyebilirsin.
 
-- `app/src/main/cpp/byedpi` → [hufrea/byedpi](https://github.com/hufrea/byedpi) (CMake ile derlenir)
-- `app/src/main/jni/hev-socks5-tunnel` → [heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (ndk-build ile derlenir)
+### Hangi uygulamalar etkilenir?
 
-## Özellikler
+**Uygulamalar** sekmesinde üç kapsam var:
 
-- **Otomatik mod:** ISS'yi **o an gerçekten bağlı olunan ağa göre** tespit eder
-  (Wi-Fi/kablolu ise dış IP'nin ASN'si, mobil veride SIM MCC+MNC — tünel açıkken
-  alttaki gerçek ağ okunur), preset havuzundaki her stratejiyi **tek tek test
-  eder**, DoH ile çözüp TLS el sıkışması yaparak çalışanı bulur ve **en düşük
-  ping'liyi** seçer. Test canlı görünür (✓/✗ + ms).
-- **Manuel mod:** ISS + preset seçilebilir; "Gelişmiş" alanına serbest ByeDPI
-  argümanı girilebilir.
-- **DNS seçimi gerçekten uygulanır:** Cloudflare / AdGuard (filtresiz veya reklam
-  engelli) / Google — ya da kendi adresiniz. Özel alan üç biçimi de kabul eder: tam
-  DoH adresi, yalnızca alan adı (IP'si seçili sağlayıcının DoH'u ile çözülür) veya
-  düz IP. Seçim iki yere birden gider: uygulamanın kendi sorguları DoH ile (IP
-  bootstrap → DNS hijack aşılır), tünel açıkken cihazdaki uygulamalara da o
-  sağlayıcının adres çifti verilir. **Tünel açıkken yapılan değişiklik anında
-  uygulanır**, yeniden bağlanmak gerekmez. Ayarlar ekranı hangi adreslerin
-  verileceğini ve o an hangilerinin etkin olduğunu yazar.
-- **Uygulama ayırma (split tunneling):** Tümü / Yalnızca seçili / Seçili hariç.
-- **Quick Settings tile:** Hızlı Panel'e eklenir, tek dokunuşla bağlar/keser; servis
-  ölmüşse yeniden başlatır. İkon beyaz/tek renk.
-- **Foreground bildirim + watchdog:** Arka planda ölmez; ölürse otomatik toparlar.
-- **Samsung Now Bar / Android 16 Live Update:** tünel açıkken kilit ekranındaki Now
-  Bar'da ve durum çubuğu chip'inde canlı gösterge. Android 16'nın "promoted
-  ongoing" sözleşmesi eksiksiz uygulanır (ongoing + başlık + colorized + promote
-  edilebilir stil + IMPORTANCE_MIN üstü kanal + `requestPromotedOngoing`).
-- **Pil muafiyeti** kartı, açılışta otomatik bağlan, opsiyonel UDP/QUIC düşürme.
-- **Ayarlar → Bilgi:** uygulamanın kendi veri kullanımı (indirilen/gönderilen/toplam),
-  işlemci süresi, pil optimizasyonu durumu ve cihaz/sürüm özeti.
+| Seçenek | Ne olur? |
+| --- | --- |
+| Tümü | Telefondaki uygulamalar DPI Bypass tünelini kullanır. |
+| Yalnızca seçili | Sadece listede işaretlediğin uygulamalar tünele girer. |
+| Seçili hariç | İşaretlediğin uygulamalar tünelin dışında kalır. |
 
-## Arayüz — "Aurora Ambient" tasarım sistemi
+İlk kurulumda “Sadece Discord” seçtiysen kapsam buna göre ayarlanır. Daha sonra **Uygulamalar** sekmesinden değiştirebilirsin. Kapsam telefonun kendi uygulamaları içindir; hotspot ile bağlanan başka bir cihazın trafiğini kapsamaz.
 
-Arayüz iki güncel referansa dayanır: **Material 3 Expressive** (süre/easing yerine
-yay fiziğiyle hareket, güçlü renk-rolü hiyerarşisi) ve **One UI 8.5 Ambient Design**
-(saydam, bulanık, yüzen yüzeyler; içeriği öne çıkaran sakin zemin).
+## Bir şey çalışmıyorsa
 
-- **Tek kaynaklı tasarım sistemi** (`ui/theme` + `ui/design`): renk rolleri ve
-  yüzey basamakları, tam tipografi ölçeği (ölçümlerde tabular rakam), şekil
-  ölçeği, yay (spring) hareket jetonları — *spatial* (konum/boyut, hafif taşmalı)
-  ve *effects* (renk/opaklık, taşmasız) ayrımıyla.
-- **Canlı ortam zemini:** yavaşça süzülen aurora ışıkları; zemin **bağlantı
-  durumunun rengini alır** (bağlıyken yeşile, hatada kırmızıya kayar).
-- **Kahraman bağlan dairesi:** nefes alan ışıma, duruma göre dönen gradyan halka,
-  test sırasında belirsiz ilerleme yayı, basınca fiziksel küçülme + haptik, canlı
-  bağlı kalma süresi.
-- **Her yerde gerçek buzlu cam (backdrop blur).** Yarı saydam düz renkler tamamen
-  kaldırıldı. Arka plan bir `GraphicsLayer`'a kaydedilir, her cam yüzey o katmanın
-  yalnızca kendi arkasına denk gelen dilimini kendi katmanına çizip `BlurEffect`
-  uygular; üstüne renk tonu, üst kenar parlaması ve şeklin konturundan çizilen saç
-  teli kenarlık biner. İki katman vardır: içerik kartları yalnızca aurora zeminini
-  örnekler, yüzen kabuk (dock, başlık şeridi, sihirbaz) zemin **ve** içeriği
-  örnekler — yani altlarından kayan yazılar gerçekten bulanıklaşır. Aurora katmanı
-  ekran dışı dokuya alınır, bulanıklık desteklemeyen cihazlarda (API < 31) cam
-  otomatik olarak yoğunlaşır.
-- **Ana ekranda canlı ölçümler:** taşıyıcı (Wi-Fi/mobil) rozeti, sağlayıcı, seçilen
-  strateji, ölçülen gecikme ve bağlı kalma süresi; altında hızlı işlem kartları.
-- **İkon-only yüzen dock:** dolu/boş ikon çiftiyle seçim, hedefe koşarken hareket
-  yönünde esneyip toparlanan (squash & stretch) gösterge ve sayfa kaydırıldıkça
-  küçülüp yerine oturan dock.
-- **Başlık devir teslimi:** büyük başlık küçülüp yukarı süzülürken çubuktaki küçük
-  başlık aşağıdan gelir; cam şerit ve alt çizgi ayrı bir eğriyle biraz geç katılır.
-  Kaydırma değeri kompozisyona hiç sızmaz (yalnızca çizim aşamasında okunur).
-- **Sekme değiştirince ekran hep en üstten başlar** — bıraktığınız kaydırma
-  konumunda uyanmazsınız.
-- Kart tonları, satır basma vurguları, ikon takasları, ölçüm değeri sayaçları,
-  rozetler, segment denetimleri, seçim işaretleri, metin alanı odağı, diyalog
-  girişleri ve liste yeniden sıralamaları — hepsi yay fiziğiyle animasyonlu.
-- **Uygulama listesinde gerçek uygulama ikonları**, arama, seçilenler en üstte.
-- **Haptik ayarı artık gerçekten çalışıyor:** bağlanma/seçim/sekme değişimi
-  şiddeti farklı dokunsal geri bildirim verir; sistemde animasyonlar kapalıysa
-  sonsuz döngülü animasyonlar durur (erişilebilirlik + pil).
-- Açık/koyu tema, gece/gündüz pencere zemini (açılışta siyah yanıp sönme yok).
+| Durum | Denenecek adım |
+| --- | --- |
+| Bağlanmıyor | İnternet bağlantını kontrol et. Android'in VPN izninin verildiğinden emin ol; başka bir VPN açıksa kapatıp yeniden dene. |
+| Bağlandı ama hedef uygulama açılmıyor | **Uygulamalar** sekmesinde hedef uygulamanın kapsama girdiğini kontrol et. Ardından **Mod** sekmesinde otomatik yöntemi dene. |
+| DNS veya sesli görüşme bozuldu | **Ayarlar** bölümündeki **UDP/QUIC'i tünelde düşür** seçeneğini kapat. Bu ayar DNS sorgularını ve UDP kullanan görüşmeleri etkileyebilir. |
+| Telefon uygulamayı arka planda durduruyor | **Ayarlar** bölümündeki pil optimizasyonu yönlendirmesini kullan. Gerekirse uygulamayı tekrar açıp bağlan. |
+| Ağ değişince bağlantı bozuldu | Bağlantıyı kapatıp yeniden aç; otomatik mod yeni ağ için yöntemi tekrar değerlendirsin. |
 
-### Performans — yavaşlatma / ping artışı YOK
+Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-DC/issues) sayfasında telefon modeli, Android sürümü, operatör, Wi-Fi/mobil veri türü ve ekranda görünen hata ile bildirebilirsin. Hesap, parola veya kişisel trafik kaydı paylaşma.
 
-Trafik uzak sunucuya yönlendirilmez; yalnızca **bağlantı kurulum aşamasındaki ilk
-paketler** (ClientHello/Host) yerelde parçalanır — veri akışına dokunulmaz. Bu yüzden
-bant genişliği kaybı ve ping artışı olmaz. Otomatik test de stratejileri **en düşük
-gecikmeye göre** puanlar (başarı birincil, latency ikincil), böylece seçilen strateji
-en hızlı çalışandır.
+## Neler sunuyor?
 
-## Derleme
+- **Otomatik yöntem:** Bağlı olduğun ağa göre çalışabilen DPI aşma stratejilerini dener ve birini seçer. **Mod** sekmesinden elle seçim de yapabilirsin.
+- **DNS seçenekleri:** Cloudflare, AdGuard, Google veya özel adres. Ayar değişince açık tünel yeniden yapılandırılır.
+- **Uygulama kapsamı:** Tüm uygulamalar, yalnızca seçilenler veya seçilenler hariç.
+- **Hızlı Panel ve bildirim:** Uygulamaya dönmeden bağlantıyı yönetme.
+- **Tablet düzeni:** Geniş ekranlarda etiketli yan gezinme ve okunabilir genişlikte içerik; telefonun alt gezinmesi korunur.
+- **İsteğe bağlı otomatik başlatma:** **Ayarlar → Cihaz açılınca otomatik bağlan**. Android'in VPN izni önceden verilmiş olmalı.
+- **Vodafone Sınırsız Modu:** Vodafone hotspot'una bağlanan rootsuz Android telefonda, DPI bağlantısı açıkken yerel proxy'nin giden IPv4 paketlerini TTL 65 ile gönderir. Hotspot telefonundaki bir yönlendirme adımı sonrasında TTL 64 olur. Mod uygulama seçimiyle sınırlanmaz; kapatınca önceki seçimlerin geri gelir. Tercihin sen kapatana kadar saklanır. IPv6 çıkışı bu modda tünel içinde reddedilir; IPv6 gerektiren ağlarda bağlantı etkilenebilir. Operatör paketinin koşullarını değiştirmez ve kota muafiyetini garanti etmez.
 
-Gereksinimler: JDK 17+, Android SDK, **NDK 26.3.11579264**, **CMake 3.22.1**.
+**Sınırlar:** Başarıyı her operatörde veya her sitede garanti etmek mümkün değildir. Yerel işleme de cihaz ve ağ koşullarına göre hız ya da gecikmeyi etkileyebilir. Bu uygulama anonimlik sağlamaz. Android VPN servisi telefonun kendi uygulama trafiğine yöneliktir; hotspot'u paylaşan telefonun diğer cihazlar için yönlendirdiği paketleri değiştirmez. [Windows sürümündeki mod](https://github.com/ATOMGAMERAGA/DPI-Bypass-Windows#vodafone-s%C4%B1n%C4%B1rs%C4%B1z-modu) bilgisayarda çalışır; Android'deki mod hotspot'a **bağlanan** telefonda çalışır.
+
+## Geliştiriciler için
+
+**Gereksinimler:** JDK 17, Android SDK, NDK `26.3.11579264` ve CMake `3.22.1`.
 
 ```bash
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/ATOMGAMERAGA/DPI-Bypass-DC.git
 cd DPI-Bypass-DC
-./gradlew assembleDebug
+./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-> Submodülleri unuttuysanız: `git submodule update --init --recursive`
+Windows'ta son satır için `gradlew.bat` kullan. Submodüller eksikse `git submodule update --init --recursive` çalıştır. Debug APK `app/build/outputs/apk/debug/` altında oluşur; son kullanıcıya dağıtılacak sürüm yerine geçmez.
 
-**Release derlemesi imzalama anahtarı ister.** `keystore.properties.example`
-dosyasını `keystore.properties` olarak kopyalayıp doldurun, sonra
-`./gradlew assembleRelease`. Anahtar tanımlı değilse derleme açık bir hatayla
-durur — debug anahtarına **düşmez** (debug imzalı sürüm dağıtılamaz: imzası her
-makinede farklıdır, üzerine güncelleme kurulmaz ve Play Protect uyarır).
-Bilinçli test için `./gradlew assembleRelease -PallowDebugSigning=true`.
-Adım adım: [`docs/Imzalama-Rehberi.md`](docs/Imzalama-Rehberi.md)
-
-## Sürüm çıkarma (tek kaynak)
-
-Sürüm **tek kaynaktan** yönetilir: `gradle.properties` içindeki `VERSION_NAME` /
-`VERSION_CODE`. `app/build.gradle.kts` bunları okur; uygulama içi sürüm
-`BuildConfig.VERSION_NAME`'den gelir.
-
-- **CI (`.github/workflows/ci.yml`):** her push + PR → submodülleri çeker, JDK17 +
-  NDK + CMake kurar, `testDebugUnitTest` + `lintDebug` + `assembleDebug` çalıştırır,
-  debug APK'yı artifact yapar. **Release yok.**
-- **Release (`.github/workflows/release.yml`):** Actions → Release → Run workflow →
-  sürüm (ör. `1.2.0`) girersin → SemVer doğrular, `versionCode` hesaplar,
-  `gradle.properties`'i günceller, testleri kapı olarak çalıştırır, imzalı APK üretir,
-  sürüm bump commit'i + `vX.Y.Z` etiketi atar, GitHub Release olarak yayınlar.
-
-### İmzalama secret'ları (Repo → Settings → Secrets and variables → Actions)
-
-`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. Dördü de
-tanımlı değilse Release workflow'u **hata verip durur** (sessizce debug imzasına
-düşmez); yalnızca "SADECE TEST" kutusu işaretlendiğinde debug anahtarına izin
-verilir ve o çalıştırma tag/release oluşturmaz.
-
-```bash
-keytool -genkeypair -v -keystore dpibypass-release.jks -alias dpibypass \
-  -keyalg RSA -keysize 4096 -validity 10000 -storetype PKCS12
-base64 -w0 dpibypass-release.jks > keystore.b64   # macOS: base64 -i ... -o keystore.b64
-```
-
-`keystore.b64` içeriğini `KEYSTORE_BASE64`'e yapıştırın. **Keystore repoya
-EKLENMEZ** (`.gitignore`) ve **kaybedilirse aynı uygulamaya güncelleme
-yayınlanamaz** — yedekleyin. Yerel derleme `keystore.properties`, CI ise
-`RELEASE_STORE_FILE` / `RELEASE_STORE_PASSWORD` / `RELEASE_KEY_ALIAS` /
-`RELEASE_KEY_PASSWORD` env değişkenlerini kullanır.
-Tam rehber: [`docs/Imzalama-Rehberi.md`](docs/Imzalama-Rehberi.md)
-
-## Dağıtım / Google
-
-- **Bildirim için Google dosyası gerekmez.** Bağlı/değil bildirimi yerel foreground
-  service bildirimidir; `google-services.json` yalnızca FCM (sunucudan push)
-  kullanılırsa gerekir. Bu proje Firebase/Play Services **kullanmaz** (temiz, F-Droid
-  uyumlu).
-- **Dağıtım:** GitHub Releases (`release.yml` üretir) + otomatik güncelleme için
-  kullanıcılara **Obtainium** önerilir (GitHub Releases'i kaynak gösterir).
-- **Geliştirici doğrulaması:** Eylül 2026'dan itibaren sertifikalı cihazlarda
-  (sideload dahil) doğrulanmış geliştirici zorunluluğu başlıyor (ilk ülkeler
-  Brezilya/Endonezya/Singapur/Tayland; Türkiye 2027+). Detay: `CI-CD-ve-Google-Rehberi.md`.
-
-## Hızlı Panel'e (Quick Settings) ekleme — Samsung One UI
-
-Bildirim panelini tam aç → **⋮ / Kalem (Düzenle)** → **DPI Bypass** tile'ını üstteki
-aktif alana sürükle → Bitti. Artık tek dokunuşla bağlanıp kesebilirsin.
-
-## Gerçekçi uyarılar
-
-- Kazanan strateji ISS'e ve zamana göre değişir; **tek sabit çözüm yoktur** — otomatik
-  test + güncellenebilir preset havuzu şarttır. Presetler `strategy/Strategy.kt`
-  içinde; kolayca JSON'a taşınıp uzaktan güncellenebilir.
-- **QUIC/UDP (HTTP/3)** bazı DPI'larda farklı davranır. Ayarlardan "UDP/QUIC'i tünelde
-  bırakma" ile UDP düşürülüp uygulamalar TCP'ye zorlanabilir (DNS/sesli görüşmeyi
-  etkileyebilir — varsayılan kapalı).
-- **DNS notu:** DoH çözümlemesi otomatik strateji testinde ve sağlık kontrolünde
-  gerçek DoH (IP bootstrap) ile yapılır. Cihazdaki diğer uygulamalar için tünel,
-  seçili sağlayıcının **iki** düz DNS adresini yazar (`addDnsServer`) ve sorgular
-  desync tüneli üzerinden gider. İkinci adres bilinçlidir: tek adres yazıldığında o
-  sunucuya ulaşılamadığı anda Android ağın kendi — yani ele geçirilmiş — sunucusuna
-  düşerdi. UDP'yi düşüren ayar açıksa DNS sorguları da düşer; bu yüzden varsayılan
-  kapalıdır.
+Uygulama Android `VpnService` ile yerel TUN açar; [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) trafiği yerel SOCKS5 bağlantısına, [ByeDPI](https://github.com/hufrea/byedpi) DPI aşma motoruna taşır. Bağımlılık ve lisans bilgileri [NOTICE](NOTICE) dosyasında. Sürüm `gradle.properties` içindeki `VERSION_NAME` ve `VERSION_CODE` ile yönetilir. İmzalı sürüm hazırlama adımları [İmzalama Rehberi](docs/Imzalama-Rehberi.md) ve [CI/CD rehberi](CI-CD-ve-Google-Rehberi.md) içinde.
 
 ## Lisans
 
-GPL-3.0 (bkz. `LICENSE`, `NOTICE`). ByeDPI ve ByeDPIAndroid GPL-3.0 olduğundan bu
-uygulama da GPL-3.0 yayımlanır.
+GPL-3.0 · Ayrıntılar için [LICENSE](LICENSE) ve [NOTICE](NOTICE).

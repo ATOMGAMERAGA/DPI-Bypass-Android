@@ -122,6 +122,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun clearSelectedApps() = launch { repo.setSelectedApps(emptySet()) }
     fun setAutoConnectOnBoot(v: Boolean) = launch { repo.setAutoConnectOnBoot(v) }
+    fun setVodafoneUnlimitedMode(v: Boolean) = launch { repo.setVodafoneUnlimitedMode(v) }
+    val vodafoneModeActive: StateFlow<Boolean> = VpnState.vodafoneModeActive
     fun setTheme(t: ThemePref) = launch { repo.setTheme(t) }
     fun setHaptics(v: Boolean) = launch { repo.setHaptics(v) }
     fun setDisableQuic(v: Boolean) = launch { repo.setDisableQuic(v) }
