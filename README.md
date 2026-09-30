@@ -6,7 +6,7 @@ Telefonunda Discord ve benzeri erişimi kısıtlanan servislere bağlanmak için
 
 ## İndir ve kullan
 
-1. [Son sürüm sayfasını aç](https://github.com/ATOMGAMERAGA/DPI-Bypass-DC/releases/latest) ve **Assets** altındaki APK dosyasını telefonuna indir. Günlük kullanım için `app-debug` adlı CI test dosyasını değil, yayımlanan sürümü seç.
+1. [Son sürüm sayfasını aç](https://github.com/ATOMGAMERAGA/DPI-Bypass-Android/releases/latest) ve **Assets** altındaki APK dosyasını telefonuna indir. Günlük kullanım için `app-debug` adlı CI test dosyasını değil, yayımlanan sürümü seç.
 2. İndirilen APK'yı açıp kur. Android dış kaynaktan kurulum izni isterse, dosyayı açtığın uygulamaya izin ver. Uyarıların metni telefon üreticisine göre değişebilir.
 3. **DPI Bypass** uygulamasını aç. İlk kurulum adımlarını tamamla ve ana ekrandaki büyük bağlan düğmesine dokun.
 4. Android'in VPN bağlantısı onayını kabul et. Ekranda **Bağlandı** durumunu gördüğünde kullanmak istediğin uygulamayı yeniden açıp dene.
@@ -35,7 +35,7 @@ Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildi
 | Telefon uygulamayı arka planda durduruyor | **Ayarlar** bölümündeki pil optimizasyonu yönlendirmesini kullan. Gerekirse uygulamayı tekrar açıp bağlan. |
 | Ağ değişince bağlantı bozuldu | Bağlantıyı kapatıp yeniden aç; otomatik mod yeni ağ için yöntemi tekrar değerlendirsin. |
 
-Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-DC/issues) sayfasında telefon modeli, Android sürümü, operatör, Wi-Fi/mobil veri türü ve ekranda görünen hata ile bildirebilirsin. Hesap, parola veya kişisel trafik kaydı paylaşma.
+Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-Android/issues) sayfasında telefon modeli, Android sürümü, operatör, Wi-Fi/mobil veri türü ve ekranda görünen hata ile bildirebilirsin. Hesap, parola veya kişisel trafik kaydı paylaşma.
 
 ## Neler sunuyor?
 
@@ -54,8 +54,8 @@ Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-DC/iss
 **Gereksinimler:** JDK 17, Android SDK, NDK `26.3.11579264` ve CMake `3.22.1`.
 
 ```bash
-git clone --recurse-submodules https://github.com/ATOMGAMERAGA/DPI-Bypass-DC.git
-cd DPI-Bypass-DC
+git clone --recurse-submodules https://github.com/ATOMGAMERAGA/DPI-Bypass-Android.git
+cd DPI-Bypass-Android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 

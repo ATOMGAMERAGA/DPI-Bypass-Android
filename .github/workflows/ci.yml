@@ -29,7 +29,7 @@ jobs:
           java-version: "17"
 
       - name: Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4.0.4
 
       - name: NDK & CMake kur
         run: yes | sdkmanager "ndk;26.3.11579264" "cmake;3.22.1"
