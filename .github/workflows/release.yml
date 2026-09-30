@@ -1,10 +1,12 @@
 name: Release
 
-# MANUEL çalışır (Actions sekmesi > Release > Run workflow).
+# Actions sekmesinden manuel veya v* etiketi gönderilince çalışır.
 # Girilen sürümü tek kaynaktan (gradle.properties) HER YERE yansıtır,
 # testleri çalıştırır, imzalı APK üretir ve GitHub Release olarak yayınlar.
 
 on:
+  push:
+    tags: [ "v*" ]
   workflow_dispatch:
     inputs:
       version:
@@ -45,15 +47,27 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Sürümü belirle
+        id: release_version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$REQUESTED_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Sürümü doğrula (SemVer X.Y.Z)
         run: |
-          echo "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+          echo "${{ steps.release_version.outputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
             || { echo "::error::Geçersiz sürüm. Beklenen biçim: X.Y.Z"; exit 1; }
 
       - name: versionCode hesapla
         id: ver
         run: |
-          IFS='.' read -r MA MI PA <<< "${{ inputs.version }}"
+          IFS='.' read -r MA MI PA <<< "${{ steps.release_version.outputs.version }}"
           # minor ve patch < 100 varsayımı; ör. 1.2.0 -> 10200
           echo "code=$((MA*10000 + MI*100 + PA))" >> "$GITHUB_OUTPUT"
 
@@ -75,7 +89,7 @@ jobs:
       # ---- Sürümü tek kaynaktan her yere yansıt ----
       - name: gradle.properties içinde sürümü güncelle
         run: |
-          sed -i "s/^VERSION_NAME=.*/VERSION_NAME=${{ inputs.version }}/" gradle.properties
+          sed -i "s/^VERSION_NAME=.*/VERSION_NAME=${{ steps.release_version.outputs.version }}/" gradle.properties
           sed -i "s/^VERSION_CODE=.*/VERSION_CODE=${{ steps.ver.outputs.code }}/" gradle.properties
           echo "----- gradle.properties -----"
           grep -E '^VERSION_(NAME|CODE)=' gradle.properties
@@ -133,9 +147,9 @@ jobs:
           mkdir -p dist
           APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
           if [ "$SIGNING_KIND" = "debug" ]; then
-            OUT="dist/DPIBypass-${{ inputs.version }}-TEST-debugsigned.apk"
+            OUT="dist/DPIBypass-${{ steps.release_version.outputs.version }}-TEST-debugsigned.apk"
           else
-            OUT="dist/DPIBypass-${{ inputs.version }}.apk"
+            OUT="dist/DPIBypass-${{ steps.release_version.outputs.version }}.apk"
           fi
           cp "$APK" "$OUT"
           # İmza sahibini logla — hangi anahtarla çıktığı sürüm kaydında görünsün.
@@ -147,30 +161,31 @@ jobs:
         if: ${{ inputs.debug_signing }}
         uses: actions/upload-artifact@v4
         with:
-          name: DPIBypass-${{ inputs.version }}-TEST-debugsigned
+          name: DPIBypass-${{ steps.release_version.outputs.version }}-TEST-debugsigned
           path: dist/*.apk
 
       - name: Sürüm bump commit'i
-        if: ${{ !inputs.debug_signing }}
+        if: ${{ !inputs.debug_signing && github.event_name == 'workflow_dispatch' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add gradle.properties
-          git commit -m "chore: release v${{ inputs.version }}" || echo "commit'lenecek değişiklik yok"
+          git commit -m "chore: release v${{ steps.release_version.outputs.version }}" || echo "commit'lenecek değişiklik yok"
           git push origin HEAD:${{ github.ref_name }}
 
       - name: Etiket oluştur
-        if: ${{ !inputs.debug_signing }}
+        if: ${{ !inputs.debug_signing && github.event_name == 'workflow_dispatch' }}
         run: |
-          git tag "v${{ inputs.version }}"
-          git push origin "v${{ inputs.version }}"
+          git tag "v${{ steps.release_version.outputs.version }}"
+          git push origin "v${{ steps.release_version.outputs.version }}"
 
       - name: GitHub Release yayınla
         if: ${{ !inputs.debug_signing }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v${{ inputs.version }}"
-          name: "DPI Bypass v${{ inputs.version }}"
+          tag_name: "v${{ steps.release_version.outputs.version }}"
+          name: "DPI Bypass v${{ steps.release_version.outputs.version }}"
           body: ${{ inputs.notes }}
+          generate_release_notes: ${{ github.event_name == 'push' || inputs.notes == '' }}
           prerelease: ${{ inputs.prerelease }}
-          files: dist/DPIBypass-${{ inputs.version }}.apk
+          files: dist/DPIBypass-${{ steps.release_version.outputs.version }}.apk

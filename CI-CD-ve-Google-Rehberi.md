@@ -11,7 +11,7 @@ Bu dosya iki şeyi açıklar:
 İki workflow dosyasını şuraya koy:
 ```
 .github/workflows/ci.yml        # her push/commit + PR'de test (release yok)
-.github/workflows/release.yml   # manuel, sürüm girerek release
+.github/workflows/release.yml   # manuel veya v* etiketiyle release
 ```
 
 ### 1.1. Sürümü tek kaynağa bağla ("her yerden değişsin")
@@ -66,7 +66,7 @@ base64 -i dpibypass-release.jks -o keystore.b64
 
 ### 1.3. Akış özeti
 - **CI (`ci.yml`)**: her push/commit + PR → submodülleri çeker, JDK17 + NDK + CMake kurar, `testDebugUnitTest` + `lintDebug` + `assembleDebug` çalıştırır, debug APK'yı artifact yapar. **Release yok.**
-- **Release (`release.yml`)**: Actions sekmesinden manuel → sürüm (ör. `1.2.0`) girersin → SemVer doğrular, `versionCode` hesaplar, `gradle.properties`'i günceller, testleri kapı olarak çalıştırır, imzalı APK üretir, sürüm bump'ını commit'ler, `v1.2.0` etiketi atar, GitHub Release olarak APK'yı yayınlar. Prerelease kutusu ve sürüm notu alanı var.
+- **Release (`release.yml`)**: Actions sekmesinden sürüm girerek manuel çalıştırılabilir. Ayrıca `gradle.properties` sürümünü güncelleyip ana dala gönderdikten sonra aynı commit'e `v1.2.0` gibi bir etiket gönderirsen otomatik başlar. Her iki yolda SemVer doğrulanır, testler çalışır, imzalı APK derlenir ve GitHub Release yayımlanır. Manuel yol sürüm bump commit'i ile etiketi kendi oluşturur; etiket yolu mevcut etiketi kullanır.
 
 > Not: `release.yml` submodülleri de çektiği için native (ByeDPI/hev-socks5-tunnel) derlenir. İlk çalıştırmadan önce keystore secret'lerini eklediğinden emin ol, yoksa iş "KEYSTORE_BASE64 tanımlı değil" ile durur.
 
