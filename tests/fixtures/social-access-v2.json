@@ -1,0 +1,323 @@
+{
+  "schemaVersion": 2,
+  "observerVersion": "1.0.0",
+  "evaluatorVersion": "1.0.0",
+  "goal": {
+    "platformId": "youtube",
+    "identityContext": "ANONYMOUS",
+    "allowedSurfaces": [
+      "OFFICIAL_WEB"
+    ],
+    "requiredCapabilities": [
+      "VIEW_SELECTED_CONTENT"
+    ],
+    "publicFallbackAllowed": true
+  },
+  "observation": {
+    "schemaVersion": 2,
+    "sessionId": "session-1",
+    "attemptId": "attempt-1",
+    "operationId": "operation-1",
+    "contextGeneration": 1,
+    "modeGeneration": 1,
+    "documentGeneration": 1,
+    "goalHash": "goal-1",
+    "targetRef": "target-1",
+    "observerVersion": "1.0.0",
+    "evaluatorVersion": "1.0.0",
+    "actualSurface": "OFFICIAL_WEB",
+    "identityContext": "ANONYMOUS",
+    "identityEvidence": "UNKNOWN",
+    "routeProvenance": "EXACT_TARGET_PATH",
+    "targetMatched": "TRUE",
+    "contentPresent": "TRUE",
+    "blockingGate": "FALSE",
+    "mediaProgress": "UNKNOWN",
+    "freshEvidence": "TRUE",
+    "documentVisible": "TRUE",
+    "observedCapabilities": [
+      "VIEW_SELECTED_CONTENT"
+    ],
+    "stableSamples": 2,
+    "stableDurationMs": 2000,
+    "mediaProgressSeconds": 0,
+    "seeking": false,
+    "advertisement": false,
+    "preview": false,
+    "observerError": false,
+    "needsInteraction": false,
+    "observerId": "youtube-dom",
+    "signalSource": "WEB_OBSERVER",
+    "observedAtMonotonic": 3000,
+    "observationWindow": 2000,
+    "budgetAccuracy": "ESTIMATED",
+    "cacheUncertain": false,
+    "rendererLoadCount": 0
+  },
+  "cases": [
+    {
+      "id": "public_content",
+      "patch": {},
+      "expectedVerdict": "PASS"
+    },
+    {
+      "id": "http_200_gate",
+      "patch": {
+        "blockingGate": "TRUE"
+      },
+      "expectedVerdict": "FAIL"
+    },
+    {
+      "id": "selector_drift",
+      "patch": {
+        "blockingGate": "UNKNOWN"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "wrong_target",
+      "patch": {
+        "targetMatched": "FALSE"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "cache_only",
+      "patch": {
+        "freshEvidence": "UNKNOWN"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "control_socket",
+      "patch": {
+        "routeProvenance": "CONTROL_PATH"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "unknown_surface",
+      "patch": {
+        "actualSurface": "UNKNOWN"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "native_goal_web_result",
+      "goalPatch": {
+        "allowedSurfaces": [
+          "OFFICIAL_NATIVE_APP"
+        ]
+      },
+      "patch": {},
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "same_account_anonymous",
+      "goalPatch": {
+        "identityContext": "SAME_ACCOUNT",
+        "publicFallbackAllowed": false
+      },
+      "patch": {},
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "same_account_unbound",
+      "goalPatch": {
+        "identityContext": "SAME_ACCOUNT"
+      },
+      "patch": {
+        "identityContext": "SAME_ACCOUNT"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "bound_account",
+      "goalPatch": {
+        "identityContext": "SAME_ACCOUNT"
+      },
+      "patch": {
+        "identityContext": "SAME_ACCOUNT",
+        "identityEvidence": "USER_BOUND_SESSION"
+      },
+      "expectedVerdict": "PASS"
+    },
+    {
+      "id": "observer_crash",
+      "patch": {
+        "observerError": true
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "hidden_document",
+      "patch": {
+        "documentVisible": "FALSE"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "one_sample",
+      "patch": {
+        "stableSamples": 1
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "too_short",
+      "patch": {
+        "stableDurationMs": 1999
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "unknown_schema",
+      "patch": {
+        "schemaVersion": 99
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "missing_content",
+      "patch": {
+        "contentPresent": "UNKNOWN"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "gesture",
+      "patch": {
+        "needsInteraction": true
+      },
+      "expectedVerdict": "NEEDS_INTERACTION"
+    },
+    {
+      "id": "playing_selected_video",
+      "goalPatch": {
+        "requiredCapabilities": [
+          "PLAY_MEDIA"
+        ]
+      },
+      "patch": {
+        "observedCapabilities": [
+          "VIEW_SELECTED_CONTENT",
+          "PLAY_MEDIA"
+        ],
+        "mediaProgress": "TRUE",
+        "mediaProgressSeconds": 3
+      },
+      "expectedVerdict": "PASS"
+    },
+    {
+      "id": "ready_state_only",
+      "goalPatch": {
+        "requiredCapabilities": [
+          "PLAY_MEDIA"
+        ]
+      },
+      "patch": {
+        "observedCapabilities": [
+          "VIEW_SELECTED_CONTENT"
+        ],
+        "mediaProgress": "UNKNOWN"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "seek_jump",
+      "goalPatch": {
+        "requiredCapabilities": [
+          "PLAY_MEDIA"
+        ]
+      },
+      "patch": {
+        "observedCapabilities": [
+          "PLAY_MEDIA"
+        ],
+        "mediaProgress": "TRUE",
+        "mediaProgressSeconds": 30,
+        "seeking": true
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "advertisement",
+      "patch": {
+        "advertisement": true
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "preview",
+      "patch": {
+        "preview": true
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "stale_observer",
+      "patch": {
+        "observerVersion": "0.0.0"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "malformed_boolean",
+      "patch": {
+        "needsInteraction": "false"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "unknown_identity_evidence",
+      "patch": {
+        "identityEvidence": "invented"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "unknown_detector",
+      "patch": {
+        "observerId": "unknown-detector"
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "fractional_sample_count",
+      "patch": {
+        "stableSamples": 2.5
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "malformed_observation_window",
+      "patch": {
+        "observationWindow": {}
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "service_worker_cache_uncertain",
+      "patch": {
+        "cacheUncertain": true
+      },
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "media_problem_requires_playback",
+      "goalPatch": {
+        "problemClass": "MEDIA_PATH_FAILURE"
+      },
+      "patch": {},
+      "expectedVerdict": "INCONCLUSIVE"
+    },
+    {
+      "id": "throttling_not_measured",
+      "goalPatch": {
+        "problemClass": "POSSIBLE_THROTTLING"
+      },
+      "patch": {},
+      "expectedVerdict": "INCONCLUSIVE"
+    }
+  ]
+}

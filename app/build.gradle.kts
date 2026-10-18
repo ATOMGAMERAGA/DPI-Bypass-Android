@@ -182,6 +182,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
@@ -195,7 +196,30 @@ dependencies {
 // yapısını kullanır). byedpi ise CMake ile (externalNativeBuild). İkisinin
 // çıktısı da jniLibs'e girer.
 // ---------------------------------------------------------------------------
+// Git on Windows may check out upstream symlinks as text files. Build from an
+// owned staging tree and turn header placeholders into relative includes; never
+// rewrite the pinned submodules or require administrator symlink privileges.
+val nativeSourceDirectory = layout.buildDirectory.dir("intermediates/nativeSources")
+val prepareNativeSources = tasks.register<Sync>("prepareNativeSources") {
+    from("src/main/jni") { exclude("**/.git", "**/.git/**") }
+    into(nativeSourceDirectory)
+    doLast {
+        val root = nativeSourceDirectory.get().asFile.canonicalFile
+        root.walkTopDown().filter { it.isFile && it.extension == "h" && it.length() < 180 }.forEach { header ->
+            val relativeTarget = header.readText().trim()
+            if (relativeTarget.matches(Regex("\\.\\./[A-Za-z0-9_./-]+"))) {
+                val target = header.parentFile.resolve(relativeTarget).canonicalFile
+                check(target.toPath().startsWith(root.toPath()) && target.isFile) {
+                    "Invalid native header link: $header -> $relativeTarget"
+                }
+                header.writeText("#include \"$relativeTarget\"\n")
+            }
+        }
+    }
+}
+
 tasks.register<Exec>("runNdkBuild") {
+    dependsOn(prepareNativeSources)
     group = "build"
     val ndkDir = android.ndkDirectory
     executable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
@@ -207,8 +231,8 @@ tasks.register<Exec>("runNdkBuild") {
         listOf(
             "NDK_PROJECT_PATH=build/intermediates/ndkBuild",
             "NDK_LIBS_OUT=src/main/jniLibs",
-            "APP_BUILD_SCRIPT=src/main/jni/Android.mk",
-            "NDK_APPLICATION_MK=src/main/jni/Application.mk",
+            "APP_BUILD_SCRIPT=build/intermediates/nativeSources/Android.mk",
+            "NDK_APPLICATION_MK=build/intermediates/nativeSources/Application.mk",
             "-j",
             Runtime.getRuntime().availableProcessors().toString()
         )

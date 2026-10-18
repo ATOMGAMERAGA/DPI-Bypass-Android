@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import net.atom.dpibypass.R
 import net.atom.dpibypass.data.ActiveProfile
 import net.atom.dpibypass.data.ConnectionState
@@ -41,6 +42,13 @@ import net.atom.dpibypass.strategy.Socks5TestClient
 import net.atom.dpibypass.util.NotificationUtils
 import net.atom.dpibypass.util.shellSplit
 import java.io.File
+import net.atom.dpibypass.social.AlphaEngine
+import net.atom.dpibypass.social.SocialAccessRuntime
+import net.atom.dpibypass.social.IneligibleCandidate
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.Socket
+import java.net.InetSocketAddress
 
 /**
  * Ana tünel servisi:
@@ -52,7 +60,7 @@ import java.io.File
  * PERFORMANS PRENSİBİ: trafik uzak sunucuya YÖNLENDİRİLMEZ; yalnızca bağlantı
  * kurulumundaki ilk paketler yerelde parçalanır. Böylece hız/ping kaybı olmaz.
  */
-class DpiVpnService : LifecycleVpnService() {
+class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
     private lateinit var settingsRepo: SettingsRepository
     private var byeDpiProxy = ByeDpiProxy()
@@ -77,10 +85,14 @@ class DpiVpnService : LifecycleVpnService() {
     // Bağlantının kurulduğu an — Now Bar / kilit ekranı bildirimindeki canlı "bağlı
     // süresi" kronometresi buradan sayar.
     private var connectedSince = 0L
+    private var alphaOperation: String? = null
+    private var alphaPreviousArgs: Array<String>? = null
+    private var alphaInstalledArgs: Array<String>? = null
 
     override fun onCreate() {
         super.onCreate()
         settingsRepo = SettingsRepository(applicationContext)
+        SocialAccessRuntime.initialize(applicationContext)
         NotificationUtils.registerChannel(this)
     }
 
@@ -133,6 +145,7 @@ class DpiVpnService : LifecycleVpnService() {
             }
 
             VpnState.update(ConnectionState.Connected, currentProfile)
+            SocialAccessRuntime.adapter.engine = this
             VpnState.updateVodafoneMode(currentVodafoneMode)
             connectedSince = System.currentTimeMillis()
             goForeground(
@@ -151,6 +164,7 @@ class DpiVpnService : LifecycleVpnService() {
 
     private suspend fun stop() {
         Log.i(TAG, "Durduruluyor")
+        SocialAccessRuntime.vpnStopped()
         watchdogJob?.cancel()
         watchdogJob = null
         settingsJob?.cancel()
@@ -251,6 +265,8 @@ class DpiVpnService : LifecycleVpnService() {
 
     private suspend fun reconfigureTunnel() {
         if (VpnState.state.value != ConnectionState.Connected) return
+        SocialAccessRuntime.settingsChanging()
+        if (SocialAccessRuntime.coordinator.state.value.phase == net.atom.dpibypass.social.Phase.RECOVERY_REQUIRED) return
         val settings = settingsRepo.settings.first()
         applyDnsPlan(settings)
         var failed = false
@@ -574,6 +590,53 @@ class DpiVpnService : LifecycleVpnService() {
                 Log.e(TAG, "Proxy yeniden başlatılamadı", e)
             }
         }
+    }
+
+    /** No second native engine: Alpha borrows this existing service under its ownership mutex. */
+    override fun resolveAlphaHost(host: String): List<String> = DohResolver(currentDohUrl).resolve(host)
+
+    override suspend fun applyAlpha(strategyId: String, operationId: String) {
+        mutex.withLock {
+            check(!stopping && VpnState.state.value == ConnectionState.Connected)
+            if (alphaOperation == operationId) return
+            check(alphaOperation == null) { "Existing Alpha owner" }
+            val strategy = checkNotNull(StrategyPool.byId(strategyId))
+            val args = VodafoneModePolicy.proxyArgs(strategy.toArgv(PROXY_PORT), currentVodafoneMode)
+            if (args.contentEquals(currentArgs)) throw IneligibleCandidate("NO_OP_EFFECT")
+            val record = checkNotNull(SocialAccessRuntime.adapter.journal.read())
+            check(record.optString("operationId") == operationId)
+            // Undo is durable before the first native stop/start can mutate anything.
+            record.put("previousArgs", JSONArray(currentArgs.toList())).put("installedArgs", JSONArray(args.toList()))
+            SocialAccessRuntime.adapter.journal.write(record)
+            alphaPreviousArgs = currentArgs.copyOf(); alphaInstalledArgs = args.copyOf(); alphaOperation = operationId
+            stopProxy()
+            currentArgs = args
+            startProxy(currentArgs)
+            check(waitForAlphaProxy()) { "ALPHA_LISTENER_UNAVAILABLE" }
+        }
+    }
+
+    override suspend fun rollbackAlpha(operationId: String): Boolean = withTimeoutOrNull(15_000) { mutex.withLock {
+        if (alphaOperation == null) return@withLock true
+        if (alphaOperation != operationId) return@withLock false
+        val previous = alphaPreviousArgs ?: return@withLock false
+        val installed = alphaInstalledArgs ?: return@withLock false
+        // Preserve external/user edits rather than overwriting a full old settings snapshot.
+        if (!currentArgs.contentEquals(installed) && !currentArgs.contentEquals(previous)) return@withLock false
+        stopProxy(); currentArgs = previous; startProxy(currentArgs)
+        val restored = currentArgs.contentEquals(previous) && waitForAlphaProxy()
+        if (restored) { alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null }
+        restored
+    } } ?: false
+
+    private suspend fun waitForAlphaProxy(): Boolean = withContext(Dispatchers.IO) {
+        repeat(30) {
+            if (proxyJob?.isActive != true) return@withContext false
+            val ready = runCatching { Socket().use { it.connect(InetSocketAddress("127.0.0.1", PROXY_PORT), 100) }; true }.getOrDefault(false)
+            if (ready) return@withContext true
+            delay(50)
+        }
+        false
     }
 
     // ---- foreground/bildirim ----

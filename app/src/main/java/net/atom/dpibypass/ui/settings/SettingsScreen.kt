@@ -97,6 +97,7 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
         title = "Ayarlar",
         subtitle = "Bağlantı davranışı, görünüm ve cihaz kısayolları.",
     ) {
+        SocialAccessCard(viewModel)
         // ---- Hızlı erişim ----
         SectionHeader("Hızlı erişim")
         AppCard(modifier = Modifier.fillMaxWidth()) {

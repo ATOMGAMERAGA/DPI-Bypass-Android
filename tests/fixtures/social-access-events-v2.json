@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 2,
+  "cases": [
+    {
+      "id": "T01",
+      "mode": "MANUAL",
+      "baselinePresent": false,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [],
+      "expectedPhase": "FINISHED",
+      "expectedFinishReason": "ALREADY_ACCESSIBLE",
+      "expectedActiveResourceCount": 0,
+      "expectedNextCandidate": null
+    },
+    {
+      "id": "T02",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [
+        "STILL_PRESENT"
+      ],
+      "expectedPhase": "WAITING_FOR_USER",
+      "expectedFinishReason": null,
+      "expectedActiveResourceCount": 1,
+      "expectedNextCandidate": "second"
+    },
+    {
+      "id": "T03",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [
+        "RESOLVED"
+      ],
+      "expectedPhase": "FINISHED",
+      "expectedFinishReason": "RESOLVED_USER_REPORTED",
+      "expectedActiveResourceCount": 1,
+      "expectedNextCandidate": null
+    },
+    {
+      "id": "T04",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [
+        "NOT_TESTED"
+      ],
+      "expectedPhase": "PAUSED",
+      "expectedFinishReason": null,
+      "expectedActiveResourceCount": 0,
+      "expectedNextCandidate": null
+    },
+    {
+      "id": "T07",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [
+        "STILL_PRESENT",
+        "REPLAY_LAST"
+      ],
+      "expectedPhase": "WAITING_FOR_USER",
+      "expectedFinishReason": null,
+      "expectedActiveResourceCount": 1,
+      "expectedNextCandidate": "second"
+    },
+    {
+      "id": "T17",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first"
+      ],
+      "events": [
+        "STILL_PRESENT"
+      ],
+      "expectedPhase": "FINISHED",
+      "expectedFinishReason": "CANDIDATES_EXHAUSTED",
+      "expectedActiveResourceCount": 0,
+      "expectedNextCandidate": null
+    },
+    {
+      "id": "T23",
+      "mode": "MANUAL",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "events": [
+        "STOP"
+      ],
+      "expectedPhase": "FINISHED",
+      "expectedFinishReason": "CANCELLED",
+      "expectedActiveResourceCount": 0,
+      "expectedNextCandidate": null
+    },
+    {
+      "id": "T29",
+      "mode": "AUTO_BETA",
+      "baselinePresent": true,
+      "candidates": [
+        "first",
+        "second"
+      ],
+      "autoVerdicts": [
+        "FAIL",
+        "PASS"
+      ],
+      "events": [],
+      "expectedPhase": "FINISHED",
+      "expectedFinishReason": "RESOLVED_AUTO_OBSERVED",
+      "expectedActiveResourceCount": 1,
+      "expectedNextCandidate": null
+    }
+  ]
+}

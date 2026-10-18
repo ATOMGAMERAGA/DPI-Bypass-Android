@@ -44,6 +44,8 @@ data class Settings(
     // Samsung + tuşlu navbar cihazlarda: tünel açıkken kalıcı VPN durum göstergesi
     // (bildirim kalıcı/kapatılamaz). Yalnızca Samsung'da ayarlarda görünür.
     val samsungVpnIndicator: Boolean = false,
+    val socialAccessEnabled: Boolean = false,
+    val socialAccessMode: net.atom.dpibypass.social.TestMode = net.atom.dpibypass.social.TestMode.MANUAL,
 ) {
     /**
      * Etkin DoH endpoint URL'i (özel varsa o, yoksa seçili sağlayıcı).
@@ -109,6 +111,8 @@ class SettingsRepository(private val context: Context) {
         // Now Bar göstergesi bu cihazlarda beklenen davranış. Kullanıcı kapatana
         // kadar canlı gösterge istenir.
         samsungVpnIndicator = this[Keys.SAMSUNG_VPN_INDICATOR] ?: DeviceInfo.isSamsung(),
+        socialAccessEnabled = runCatching { this[Keys.SOCIAL_ENABLED] }.getOrNull() ?: false,
+        socialAccessMode = net.atom.dpibypass.social.TestMode.parse(runCatching { this[Keys.SOCIAL_MODE] }.getOrNull()),
     )
 
     suspend fun setOperationMode(mode: OperationMode) = put(Keys.OPERATION_MODE, mode.name)
@@ -129,6 +133,8 @@ class SettingsRepository(private val context: Context) {
     suspend fun setExtraBlockedHosts(v: String) = put(Keys.EXTRA_BLOCKED_HOSTS, v)
     suspend fun setOnboardingDone(v: Boolean) = put(Keys.ONBOARDING_DONE, v)
     suspend fun setSamsungVpnIndicator(v: Boolean) = put(Keys.SAMSUNG_VPN_INDICATOR, v)
+    suspend fun setSocialAccessEnabled(v: Boolean) = put(Keys.SOCIAL_ENABLED, v)
+    suspend fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = put(Keys.SOCIAL_MODE, v.name)
 
     /**
      * Ağ profili: bir ağ anahtarına (taşıyıcı + ISS) o ağda KAZANMIŞ stratejiyi
@@ -177,6 +183,8 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[key] = value }
 
     private object Keys {
+        val SOCIAL_ENABLED = booleanPreferencesKey("social_access_enabled")
+        val SOCIAL_MODE = stringPreferencesKey("social_access_mode")
         val OPERATION_MODE = stringPreferencesKey("operation_mode")
         val SELECTED_ISP = stringPreferencesKey("selected_isp")
         val SELECTED_STRATEGY = stringPreferencesKey("selected_strategy")
