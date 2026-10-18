@@ -88,6 +88,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val network: StateFlow<NetworkInfo> = _network.asStateFlow()
 
     init {
+        net.atom.dpibypass.social.SocialAccessRuntime.initialize(app)
         refreshNetwork()
     }
 
@@ -130,6 +131,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setExtraBlockedHosts(v: String) = launch { repo.setExtraBlockedHosts(v) }
     fun setOnboardingDone(v: Boolean) = launch { repo.setOnboardingDone(v) }
     fun setSamsungVpnIndicator(v: Boolean) = launch { repo.setSamsungVpnIndicator(v) }
+    fun setSocialAccessEnabled(v: Boolean) = launch {
+        net.atom.dpibypass.social.SocialAccessRuntime.coordinator.enabled(v)
+        net.atom.dpibypass.social.SocialAccessRuntime.observeNetworks(v)
+        repo.setSocialAccessEnabled(v)
+    }
+    fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = launch {
+        repo.setSocialAccessMode(v)
+        if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()
+        else net.atom.dpibypass.social.SocialAccessRuntime.coordinator.automatic()
+    }
 
     /**
      * "Sadece Discord" modu: uygulama yalnızca Discord'un trafiğini tünelden
@@ -163,6 +174,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun runStrategyTest() {
         if (_testing.value || !canRunTest.value) return
+        val alpha = net.atom.dpibypass.social.SocialAccessRuntime.coordinator.state.value
+        if (alpha.resourceDisposition != "NONE") return
         _testing.value = true
         _testWinner.value = null
         launch {
