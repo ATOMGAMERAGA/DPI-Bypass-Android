@@ -48,8 +48,10 @@ import net.atom.dpibypass.ui.mode.ModeScreen
 import net.atom.dpibypass.ui.nav.BottomDock
 import net.atom.dpibypass.ui.nav.TabletRail
 import net.atom.dpibypass.ui.nav.Dest
+import net.atom.dpibypass.ui.nav.SocialRoute
 import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
 import net.atom.dpibypass.ui.settings.SettingsScreen
+import net.atom.dpibypass.ui.social.SocialAccessScreen
 import net.atom.dpibypass.ui.theme.DpiBypassTheme
 import net.atom.dpibypass.util.DeviceInfo
 import net.atom.dpibypass.util.QuickTile
@@ -235,7 +237,25 @@ private fun AppRoot(
                 }
                 composable(Dest.Mode.route) { ModeScreen(viewModel) }
                 composable(Dest.Apps.route) { AppsScreen(viewModel) }
-                composable(Dest.Settings.route) { SettingsScreen(viewModel, onRequestTile = onRequestTile) }
+                composable(Dest.Settings.route) {
+                    SettingsScreen(
+                        viewModel,
+                        onRequestTile = onRequestTile,
+                        onOpenSocial = { navController.navigate(SocialRoute) { launchSingleTop = true } },
+                    )
+                }
+                composable(SocialRoute) {
+                    SocialAccessScreen(
+                        viewModel = viewModel,
+                        onBack = { navController.popBackStack() },
+                        onOpenHome = {
+                            navController.navigate(Dest.Home.route) {
+                                popUpTo(Dest.Home.route)
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
             }
         }
         }

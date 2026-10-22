@@ -23,6 +23,8 @@ interface TrialAdapter {
     fun quarantined(target: Target, goal: Goal): Boolean = false
     fun cooldownRemainingMillis(): Long = 0
     fun persistCooldown(delayMillis: Long) {}
+    /** Süreç yeniden başladıktan sonra artık geçerli olmayan kurtarma kaydını siler. */
+    fun clearRecovery() {}
 }
 
 class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope: CoroutineScope,
@@ -54,9 +56,21 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
     suspend fun markRecoveryRequired() { mutex.withLock { recoveryBlocked = true; update { copy(phase = Phase.RECOVERY_REQUIRED,
         resourceDisposition = "RECOVERY_REQUIRED", message = "Kurtarma kaydı bozuk; yeni Alpha denemesi engellendi.") } } }
 
-    fun enabled(value: Boolean) { enabledFlag = value; scope.launch { if (!value) stop(true) else mutex.withLock {
-        if (state.value.phase == Phase.DISABLED) update { copy(phase = Phase.IDLE) }
-    } } }
+    /** İdempotent: aynı değer tekrar geldiğinde (ör. ekran yeniden açıldığında) durum yazılmaz. */
+    fun enabled(value: Boolean) {
+        val changed = enabledFlag != value
+        enabledFlag = value
+        if (!changed && (value || state.value.phase == Phase.DISABLED)) return
+        scope.launch { if (!value) stop(true) else mutex.withLock {
+            if (state.value.phase == Phase.DISABLED) update { copy(phase = Phase.IDLE) }
+        } }
+    }
+
+    /** Uygulanmış/korunan bir kaynak veya sürmekte olan bir deneme var mı? */
+    fun active(): Boolean = state.value.let { s ->
+        s.resourceDisposition != "NONE" || s.phase !in setOf(Phase.DISABLED, Phase.IDLE, Phase.FINISHED) &&
+            !(s.phase == Phase.PAUSED && s.pauseReason == "CONTEXT_CHANGED")
+    }
 
     suspend fun start(goal: Goal, target: Target, mode: TestMode, baselineStillPresent: Boolean?,
         metered: Boolean, allowMeteredRenderer: Boolean, candidates: List<CandidateDefinition>) {
@@ -70,11 +84,12 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             if (!enabledFlag || state.value.phase == Phase.RECOVERY_REQUIRED) return
             eventIds.clear(); probeMs = 0; groupAttempts = 0; pendingResolution = null; autoCorrected = adapter.quarantined(target, goal)
             meterAllowed = !metered || allowMeteredRenderer
-            observerAvailable = goal.identityContext == "ANONYMOUS" && "CONTROLLED_WEB_VIEW" in goal.allowedSurfaces
+            observerAvailable = goal.identityContext == "ANONYMOUS" && "CONTROLLED_WEB_VIEW" in goal.allowedSurfaces &&
+                SocialPlatform.supportsAutoObserver(target.platformId) && target.contentId != Target.HOME_CONTENT
             catalog = candidates.filter { it.schemaVersion == 2 && it.candidateVersion == "1.0.0" }.distinctBy { it.effectKey }
             pending = ArrayDeque(catalog)
             mutable.value = TrialState(phase = Phase.BASELINING, mode = mode, sessionId = id(), goal = goal, target = target,
-                message = "A0: özgün hedefin mevcut durumu", version = state.value.version + 1)
+                message = "Başlangıç ölçümü: hedefin şu anki durumu", version = state.value.version + 1)
             if (baselineStillPresent == false) {
                 update { copy(phase = Phase.FINISHED, finishReason = "ALREADY_ACCESSIBLE", message = "Sorun başlangıçta yok; yöntem başarısı yazılmadı.") }
                 return
@@ -94,7 +109,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                         ?: NetworkEvidence("UNKNOWN", bytes = 262_144, reason = "BASELINE_TRANSPORT_UNKNOWN")
                     probeMs += (now() - began).coerceAtLeast(0)
                     update { copy(technicalOutcome = baseline.technicalOutcome, diagnosticBytes = diagnosticBytes - 262_144 + baseline.bytes.coerceIn(0, 262_144),
-                        message = "A0: ${baseline.reason}; özgün native/hesap içeriği bilinmiyor.") }
+                        message = "Başlangıç: ${SocialText.evidence(baseline.reason)}.") }
                     if (baseline.retryAfterSeconds > 0) {
                         cooldown(baseline.retryAfterSeconds)
                         update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN", message = "Hedef hız sınırı bildirdi; yeni istek durduruldu.") }; return@withLock
@@ -132,7 +147,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                         probeMs += (now() - began).coerceAtLeast(0)
                         update { copy(technicalOutcome = evidence.technicalOutcome,
                             diagnosticBytes = diagnosticBytes - 262_144 + evidence.bytes.coerceIn(0, 262_144),
-                            message = "${candidate.displayName}: ${evidence.reason}. Bağlantı testi içerik/hesap başarısı değildir.") }
+                            message = "${candidate.displayName}: ${SocialText.evidence(evidence.reason)}. Şimdi uygulamada/tarayıcıda kontrol edin.") }
                         if (evidence.retryAfterSeconds > 0) {
                             cooldown(evidence.retryAfterSeconds)
                             if (rollback()) update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN", message = "Hız sınırı: ${evidence.retryAfterSeconds} saniye bekleyin.") }
@@ -237,6 +252,11 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
     }
 
     suspend fun manual() {
+        // Mod seçici boştayken de çağırır: süren/ertelenmiş bir deneme yoksa
+        // durum değişmez (eskiden boştaki ekran "duraklatıldı"ya düşüyordu).
+        val s = state.value
+        if (s.sessionId.isBlank() || s.phase == Phase.DISABLED || s.finishReason == "CANCELLED" ||
+            !active() && s.deferred.isEmpty()) return
         work?.cancelAndJoin()
         var startDeferred = false
         mutex.withLock {
@@ -291,7 +311,9 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
         launchNext()
     }
 
+    /** Ağ/ayar değişimi. Etkin deneme yoksa hiçbir şey yapmaz: biten bir sonucun ekranı ezilmez. */
     suspend fun contextChanged() {
+        if (!active()) return
         stop()
         mutex.withLock { if (state.value.phase != Phase.RECOVERY_REQUIRED) update { copy(phase = Phase.PAUSED, contextGeneration = contextGeneration + 1,
             pauseReason = "CONTEXT_CHANGED", finishReason = null, message = "Alttaki ağ değişti; hedefi yeniden başlatıp baseline alın.") } }
@@ -303,6 +325,26 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             if (!rollback()) return
             update { copy(phase = if (disable) Phase.DISABLED else Phase.FINISHED, finishReason = "CANCELLED", modeGeneration = modeGeneration + 1,
                 documentGeneration = documentGeneration + 1, message = "Alpha kaynakları geri alındı.") }
+        }
+    }
+
+    /**
+     * Kurtarma kilidini çözmeyi dener. Etkin bir operasyon varsa geri alma yeniden
+     * denenir; yoksa (bozuk kayıt, süreç yeniden başlamış — native durum süreç
+     * kapsamlıdır) kayıt temizlenip deneme hazır duruma döner.
+     */
+    suspend fun retryRecovery() {
+        work?.cancelAndJoin(); inactivity?.cancel(); work = null
+        mutex.withLock {
+            if (state.value.phase != Phase.RECOVERY_REQUIRED) return
+            val wasBlocked = recoveryBlocked
+            recoveryBlocked = false
+            val ok = if (state.value.operationId.isBlank()) true else rollback()
+            if (!ok) { recoveryBlocked = wasBlocked; return }
+            runCatching { adapter.clearRecovery() }
+            pending = ArrayDeque(); pendingResolution = null
+            update { copy(phase = if (enabledFlag) Phase.IDLE else Phase.DISABLED, resourceDisposition = "NONE", operationId = "",
+                finishReason = null, pauseReason = null, message = "Kurtarma tamamlandı; yeni deneme başlatılabilir.") }
         }
     }
 

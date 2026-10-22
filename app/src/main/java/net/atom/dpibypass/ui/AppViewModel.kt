@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -90,6 +91,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         net.atom.dpibypass.social.SocialAccessRuntime.initialize(app)
         refreshNetwork()
+        // Sosyal Erişim açık/kapalı durumu, kaydedilmiş GERÇEK değerden izlenir.
+        // `settings` StateFlow'u DataStore okunana kadar varsayılan `Settings()`
+        // (kapalı) yayınlar; eskiden ekran bu ilk değeri görüp süren bir denemeyi
+        // durdurabiliyordu.
+        viewModelScope.launch {
+            repo.settings.map { it.socialAccessEnabled }.distinctUntilChanged().collect { enabled ->
+                net.atom.dpibypass.social.SocialAccessRuntime.coordinator.enabled(enabled)
+                net.atom.dpibypass.social.SocialAccessRuntime.observeNetworks(enabled)
+            }
+        }
     }
 
     /**
@@ -131,15 +142,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setExtraBlockedHosts(v: String) = launch { repo.setExtraBlockedHosts(v) }
     fun setOnboardingDone(v: Boolean) = launch { repo.setOnboardingDone(v) }
     fun setSamsungVpnIndicator(v: Boolean) = launch { repo.setSamsungVpnIndicator(v) }
-    fun setSocialAccessEnabled(v: Boolean) = launch {
-        net.atom.dpibypass.social.SocialAccessRuntime.coordinator.enabled(v)
-        net.atom.dpibypass.social.SocialAccessRuntime.observeNetworks(v)
-        repo.setSocialAccessEnabled(v)
-    }
+    fun setSocialAccessEnabled(v: Boolean) = launch { repo.setSocialAccessEnabled(v) }
     fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = launch {
         repo.setSocialAccessMode(v)
         if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()
         else net.atom.dpibypass.social.SocialAccessRuntime.coordinator.automatic()
+    }
+
+    /** Sosyal Erişim yöntem sırası: o an bağlı olunan ağın ISS ailesine göre. */
+    fun socialIspFamily() = (network.value.isp ?: settings.value.selectedIsp).family
+
+    /**
+     * Sosyal Erişim'de işe yaradığı bildirilen yerel DPI profilini kalıcılaştırır:
+     * strateji testinin kazananı gibi hem manuel seçime hem bu ağın profiline
+     * yazılır. Strateji tüneli yeniden kurdurmaz; çalışan deneme yerinde kalır,
+     * sonraki bağlantılar da bu profille açılır.
+     */
+    fun keepSocialStrategy(strategyId: String) = launch {
+        if (StrategyPool.byId(strategyId) == null) return@launch
+        repo.setSelectedStrategy(strategyId)
+        val detector = IspDetector(getApplication<Application>())
+        val transport = detector.activeTransport()
+        val isp = network.value.isp ?: runCatching { detector.bestGuess() }.getOrNull() ?: settings.value.selectedIsp
+        repo.saveNetworkProfile(IspDetector.networkKey(transport, isp), strategyId)
     }
 
     /**

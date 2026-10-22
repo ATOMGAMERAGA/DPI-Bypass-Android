@@ -43,7 +43,10 @@ fun ControlledWebProbe(state: TrialState, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val target = state.target ?: return
     val lifecycle = LocalLifecycleOwner.current
-    val script = remember { context.assets.open("social-observer.js").bufferedReader().use { it.readText() } }
+    // Gözlemci betiği ana iş parçacığını bekletmeden okunur; hazır olana kadar gözlem başlamaz.
+    val script by produceState<String?>(null) {
+        value = withContext(Dispatchers.IO) { context.assets.open("social-observer.js").bufferedReader().use { it.readText() } }
+    }
     var visible by remember { mutableStateOf(true) }
     var navigation by remember { mutableLongStateOf(0) }
     var failed by remember { mutableStateOf(false) }
@@ -113,7 +116,8 @@ fun ControlledWebProbe(state: TrialState, modifier: Modifier = Modifier) {
         }
     }
     AndroidView(factory = { view }, modifier = modifier)
-    LaunchedEffect(state.operationId, state.documentGeneration, state.phase, visible, navigation) {
+    LaunchedEffect(state.operationId, state.documentGeneration, state.phase, visible, navigation, script) {
+        val observerScript = script ?: return@LaunchedEffect
         if (state.phase != Phase.AUTO_EVALUATING) {
             view.evaluateJavascript("if(window.__dpiAlphaObservationV1&&window.__dpiAlphaObservationV1.dispose)window.__dpiAlphaObservationV1.dispose();delete window.__dpiAlphaObservationV1", null)
             return@LaunchedEffect
@@ -134,7 +138,7 @@ fun ControlledWebProbe(state: TrialState, modifier: Modifier = Modifier) {
             val actual = Target.parse(target.platformId, view.url ?: "")
             val json = if (visible && !failed) runCatching {
                 val raw = suspendCancellableCoroutine<String> { continuation ->
-                    view.evaluateJavascript(script) { answer -> if (continuation.isActive) continuation.resume(answer ?: "null") }
+                    view.evaluateJavascript(observerScript) { answer -> if (continuation.isActive) continuation.resume(answer ?: "null") }
                 }
                 check(raw.length <= 16384)
                 val value = JSONObject(JSONTokener(raw).nextValue() as String)
