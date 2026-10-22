@@ -176,6 +176,62 @@ class SocialCoordinatorTest {
         c.resume(); runCurrent()
         assertEquals(requests, a.probeCount); c.stop()
     }
+    @Test fun repeatedEnableAndIdleContextChangesDoNotRewriteState() = runTest {
+        val a = Adapter(); val c = coordinator(a, backgroundScope); runCurrent()
+        assertEquals(Phase.IDLE, c.state.value.phase)
+        val version = c.state.value.version
+        c.enabled(true); runCurrent()
+        c.contextChanged(); runCurrent()
+        c.manual(); runCurrent()
+        assertEquals(version, c.state.value.version)
+        assertEquals(Phase.IDLE, c.state.value.phase)
+        c.enabled(false); runCurrent()
+        assertEquals(Phase.DISABLED, c.state.value.phase)
+        val disabledVersion = c.state.value.version
+        c.enabled(false); runCurrent()
+        assertEquals(disabledVersion, c.state.value.version)
+    }
+    @Test fun finishedResultSurvivesNetworkChangeButActiveTrialPauses() = runTest {
+        val a = Adapter(); val c = coordinator(a, backgroundScope)
+        c.start(goal, target, TestMode.MANUAL, false, false, false, candidates)
+        c.contextChanged(); runCurrent()
+        assertEquals("ALREADY_ACCESSIBLE", c.state.value.finishReason)
+        c.start(goal, target, TestMode.MANUAL, true, false, false, candidates); runCurrent()
+        c.contextChanged(); runCurrent()
+        assertEquals("CONTEXT_CHANGED", c.state.value.pauseReason)
+        assertNull(a.owned)
+    }
+    @Test fun recoveryCanBeRetriedOnceRollbackWorks() = runTest {
+        val a = Adapter(); val c = coordinator(a, backgroundScope)
+        c.start(goal, target, TestMode.MANUAL, true, false, false, candidates); runCurrent()
+        a.rollbackWorks = false
+        c.feedback(c.state.value.feedback("STILL_PRESENT")); runCurrent()
+        assertEquals(Phase.RECOVERY_REQUIRED, c.state.value.phase)
+        c.retryRecovery(); runCurrent()
+        assertEquals(Phase.RECOVERY_REQUIRED, c.state.value.phase)
+        a.rollbackWorks = true
+        c.retryRecovery(); runCurrent()
+        assertEquals(Phase.IDLE, c.state.value.phase)
+        assertNull(a.owned)
+        c.start(goal, target, TestMode.MANUAL, true, false, false, candidates); runCurrent()
+        assertEquals(Phase.WAITING_FOR_USER, c.state.value.phase); c.stop()
+    }
+    @Test fun corruptJournalAtStartupCanBeCleared() = runTest {
+        val a = Adapter(); val c = coordinator(a, backgroundScope)
+        c.markRecoveryRequired(); runCurrent()
+        c.start(goal, target, TestMode.MANUAL, true, false, false, candidates); runCurrent()
+        assertTrue(a.events.none { it.startsWith("apply:") })
+        c.retryRecovery(); runCurrent()
+        assertEquals(Phase.IDLE, c.state.value.phase)
+    }
+    @Test fun platformsWithoutObserverNeverStartTheRenderer() = runTest {
+        val a = Adapter(); val c = coordinator(a, backgroundScope)
+        val tiktok = Target.parse("tiktok", "https://www.tiktok.com/@user/video/123")!!
+        c.start(goal.copy(platformId = "tiktok"), tiktok, TestMode.AUTO_BETA, true, false, false, candidates); runCurrent()
+        assertEquals(0, c.state.value.rendererLoads)
+        assertEquals("AUTO_UNAVAILABLE", c.state.value.finishReason)
+        assertNull(a.owned)
+    }
     private fun positive(s: TrialState) = Observation(sessionId = s.sessionId, attemptId = s.attemptId, operationId = s.operationId,
         contextGeneration = s.contextGeneration, modeGeneration = s.modeGeneration, documentGeneration = s.documentGeneration,
         targetRef = s.target!!.targetRef, goalHash = s.goal.hashCode().toString(), observerVersion = "1.0.0", evaluatorVersion = "1.0.0",

@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RenderEffect
@@ -319,16 +320,29 @@ fun Modifier.glass(
 
                 val base = backdrop?.takeIf { it.hasContent }
                 val over = overlayBackdrop?.takeIf { it.hasContent }
-                if (live && (base != null || over != null) && size.minDimension > 0f) {
-                    // Kayıt, yüzeyden her yöne [padPx] kadar TAŞAR; bulanıklık
+                val visible = if (live && (base != null || over != null) && size.minDimension > 0f) {
+                    visibleSlice(position.value, size.width, size.height, base, over)
+                } else {
+                    null
+                }
+                if (visible != null) {
+                    // YALNIZCA GÖRÜNEN DİLİM bulanıklaştırılır. Kayıt eskiden kartın
+                    // tamamı kadardı: ekrandan taşan uzun bir kart (ör. açılmış bir
+                    // ayar bloğu) her karede ekranın birkaç katı büyüklüğünde bir
+                    // dokuyu bulanıklaştırıyordu — güçlü telefonlarda bile kasmanın
+                    // sebebi buydu. Arka plan katmanlarının dışında örneklenecek
+                    // piksel zaten yok; görüntü birebir aynı, maliyet ise artık kart
+                    // boyundan bağımsız.
+                    //
+                    // Kayıt, dilimden her yöne [padPx] kadar TAŞAR; bulanıklık
                     // böylece gerçek komşu piksellerden beslenir (bkz. blurPadding).
                     // Çizerken aynı pay geri ötelenir, taşan kısmı da dıştaki
                     // clip(shape) kırpar.
                     val pad = padPx.toFloat()
                     blurLayer.record(
                         size = IntSize(
-                            ceil(size.width).toInt() + padPx * 2,
-                            ceil(size.height).toInt() + padPx * 2,
+                            ceil(visible.width).toInt() + padPx * 2,
+                            ceil(visible.height).toInt() + padPx * 2,
                         ),
                     ) {
                         drawRect(baseFill)
@@ -337,20 +351,20 @@ fun Modifier.glass(
                         // de kenarlarda çift halka bırakırdı.
                         base?.let {
                             translate(
-                                left = pad - (position.value.x - it.origin.x),
-                                top = pad - (position.value.y - it.origin.y),
+                                left = pad - (position.value.x + visible.left - it.origin.x),
+                                top = pad - (position.value.y + visible.top - it.origin.y),
                             ) { drawLayer(it.layer) }
                         }
                         over?.let {
                             translate(
-                                left = pad - (position.value.x - it.origin.x),
-                                top = pad - (position.value.y - it.origin.y),
+                                left = pad - (position.value.x + visible.left - it.origin.x),
+                                top = pad - (position.value.y + visible.top - it.origin.y),
                             ) { drawLayer(it.layer) }
                         }
                     }
                     blurLayer.renderEffect = effect
                     blurLayer.alpha = a
-                    translate(left = -pad, top = -pad) { drawLayer(blurLayer) }
+                    translate(left = visible.left - pad, top = visible.top - pad) { drawLayer(blurLayer) }
                 }
                 drawRect(tint, alpha = a)
                 if (sheen) drawRect(sheenBrush, alpha = a)
@@ -359,6 +373,38 @@ fun Modifier.glass(
                 }
             }
         }
+}
+
+/**
+ * Yüzeyin, örneklenen arka plan katmanlarının (pratikte ekranın) içinde kalan
+ * bölümü — yüzeyin kendi koordinatlarında. Hiç görünmüyorsa null: o karede
+ * bulanıklık tamamen atlanır.
+ */
+private fun visibleSlice(
+    position: Offset,
+    width: Float,
+    height: Float,
+    base: BackdropState?,
+    over: BackdropState?,
+): Rect? {
+    var left = Float.POSITIVE_INFINITY
+    var top = Float.POSITIVE_INFINITY
+    var right = Float.NEGATIVE_INFINITY
+    var bottom = Float.NEGATIVE_INFINITY
+    for (b in arrayOf(base, over)) {
+        if (b == null) continue
+        left = minOf(left, b.origin.x)
+        top = minOf(top, b.origin.y)
+        right = maxOf(right, b.origin.x + b.layer.size.width)
+        bottom = maxOf(bottom, b.origin.y + b.layer.size.height)
+    }
+    val slice = Rect(
+        left = (left - position.x).coerceAtLeast(0f),
+        top = (top - position.y).coerceAtLeast(0f),
+        right = (right - position.x).coerceAtMost(width),
+        bottom = (bottom - position.y).coerceAtMost(height),
+    )
+    return slice.takeIf { it.width > 0f && it.height > 0f }
 }
 
 /** Çizim sırasında okunan konum — `State` değil, çünkü kompozisyonu tetiklememeli. */

@@ -66,6 +66,16 @@ enum class Dest(
     Settings("settings", "Ayarlar", Icons.Outlined.Settings, Icons.Rounded.Settings),
 }
 
+/** Dock'ta yer almayan alt sayfa: Ayarlar'dan açılır, gezinmede Ayarlar seçili kalır. */
+const val SocialRoute = "social"
+
+/** Bir rotanın dock/raydaki sekmesi; alt sayfalar ait oldukları sekmeyi gösterir. */
+fun tabRouteFor(route: String?): String = when (route) {
+    null -> Dest.Home.route
+    SocialRoute -> Dest.Settings.route
+    else -> route
+}
+
 // Dock'un iki durağı. Aradaki geçiş yayla sürülür; ARADA SÜREKLİ BİR DEĞER YOKTUR
 // (nedeni aşağıda, "CAM NEDEN ÖLÇEKLENMEZ" başlığında).
 private val ItemWidth = 62.dp
@@ -127,7 +137,7 @@ private val CompactThreshold = 56.dp
 @Composable
 fun BottomDock(navController: NavController, modifier: Modifier = Modifier) {
     val backStack by navController.currentBackStackEntryAsState()
-    val current = backStack?.destination?.route ?: Dest.Home.route
+    val current = tabRouteFor(backStack?.destination?.route)
     val haptics = rememberHaptics()
     val chrome = LocalChrome.current
     val shell = LocalShellBackdrop.current

@@ -51,32 +51,152 @@ data class Target(val platformId: String, val url: String, val contentId: String
             setOf("youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "gstatic.com", "google.com",
                 "instagram.com", "cdninstagram.com", "fbcdn.net").any { host == it || host.endsWith(".$it") }
         }.getOrDefault(false)
+        /** Platform ana sayfası; bağlantı verilmediğinde Manuel testin hedefi. */
+        const val HOME_CONTENT = "home"
+        fun home(platform: String): Target? = SocialPlatform.byId(platform)?.let { Target(it.id, it.homeUrl, HOME_CONTENT) }
+
+        /** Paylaşım metninden ("Şuna bak: https://…") ilk bağlantıyı ayıklar. */
+        fun extractUrl(text: String): String {
+            val trimmed = text.trim()
+            Regex("https?://[^\\s<>\"']+").find(trimmed)?.let { return it.value.trimEnd('.', ',', ';', ':', '!', '?', ')', ']') }
+            return trimmed
+        }
+
+        /** Bağlantının ait olduğu platform; tanınmıyorsa null. */
+        fun detectPlatform(raw: String): SocialPlatform? = runCatching {
+            val host = URI(normalize(raw)).host?.lowercase() ?: return null
+            SocialPlatform.entries.firstOrNull { it.owns(host) }
+        }.getOrNull()
+
+        /** Şemasız girişe ("youtube.com/…") https eklenir; http:// olduğu gibi kalır ve reddedilir. */
+        private fun normalize(raw: String): String {
+            val url = extractUrl(raw)
+            return if ("://" in url) url else "https://$url"
+        }
+
         fun parse(platform: String, raw: String): Target? = runCatching {
-            val u = URI(raw.trim())
-            if (u.scheme != "https" || u.userInfo != null || u.port !in listOf(-1, 443) || u.fragment != null) return null
+            val u = URI(normalize(raw))
+            // Fragman sunucuya hiç gitmez; atılır. Sorgu da (si, igsh gibi izleme
+            // parametreleri) yalnızca platformun gerçekten ihtiyaç duyduğu anahtarlar
+            // dışında kanonik bağlantıya taşınmaz.
+            if (u.scheme != "https" || u.userInfo != null || u.port !in listOf(-1, 443)) return null
             val host = u.host?.lowercase() ?: return null
-            val path = u.rawPath ?: "/"
+            val path = u.rawPath?.ifEmpty { "/" } ?: "/"
             val canonical: String
             val id: String
             when (platform) {
                 "youtube" -> {
-                    if (host !in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be")) return null
-                    id = if (host == "youtu.be") path.removePrefix("/") else if (path == "/watch") {
+                    if (host !in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be")) return null
+                    val segment = Regex("/(shorts|live|embed)/([^/]+)/?").matchEntire(path)
+                    id = if (host == "youtu.be") path.removePrefix("/").removeSuffix("/") else if (path == "/watch") {
                         u.rawQuery?.split('&')?.singleOrNull { it.startsWith("v=") }?.removePrefix("v=") ?: return null
-                    } else if (path.startsWith("/shorts/")) path.removePrefix("/shorts/") else return null
+                    } else segment?.groupValues?.get(2) ?: return null
                     if (!id.matches(Regex("[A-Za-z0-9_-]{11}"))) return null
                     canonical = "https://www.youtube.com/watch?v=$id"
                 }
                 "instagram" -> {
-                    if (host !in setOf("instagram.com", "www.instagram.com")) return null
-                    val match = Regex("/(p|reel)/([A-Za-z0-9_-]{3,80})/?").matchEntire(path) ?: return null
+                    if (host !in setOf("instagram.com", "www.instagram.com", "m.instagram.com")) return null
+                    // /p/, /reel/, /reels/, /tv/ ve kullanıcı adı önekli biçimler (/kullanici/p/…).
+                    val match = Regex("(?:/[A-Za-z0-9._]{1,30})?/(p|reel|reels|tv)/([A-Za-z0-9_-]{3,80})/?").matchEntire(path) ?: return null
                     id = match.groupValues[2]
-                    canonical = "https://www.instagram.com/${match.groupValues[1]}/$id/"
+                    val kind = when (match.groupValues[1]) { "reels", "reel" -> "reel"; else -> "p" }
+                    canonical = "https://www.instagram.com/$kind/$id/"
                 }
-                else -> return null
+                else -> {
+                    val p = SocialPlatform.byId(platform) ?: return null
+                    if (p.autoObserver || !p.owns(host)) return null
+                    if (path.length > 200 || !path.matches(Regex("/[A-Za-z0-9._~@%+\\-/]*"))) return null
+                    val query = u.rawQuery?.split('&')?.filter { pair -> p.queryKeys.any { pair.startsWith("$it=") } }
+                        ?.filter { it.matches(Regex("[A-Za-z_]+=[A-Za-z0-9_\\-]{1,64}")) }.orEmpty()
+                    id = path.split('/').lastOrNull { it.isNotEmpty() } ?: HOME_CONTENT
+                    canonical = "https://$host$path" + if (query.isEmpty()) "" else query.joinToString("&", prefix = "?")
+                }
             }
             Target(platform, canonical, id)
         }.getOrNull()
+    }
+}
+
+/**
+ * Desteklenen platformlar. [autoObserver] yalnızca test penceresinde içerik
+ * gözlemcisi (social-observer.js) olan platformlarda açıktır; diğerleri bağlantı
+ * testi + kullanıcı bildirimiyle (Manuel) çalışır.
+ */
+enum class SocialPlatform(val id: String, val displayName: String, val hosts: Set<String>, val homeUrl: String,
+    val autoObserver: Boolean, val queryKeys: Set<String> = emptySet()) {
+    YOUTUBE("youtube", "YouTube", setOf("youtube.com", "youtu.be"), "https://www.youtube.com/", true),
+    INSTAGRAM("instagram", "Instagram", setOf("instagram.com"), "https://www.instagram.com/", true),
+    X("x", "X (Twitter)", setOf("x.com", "twitter.com"), "https://x.com/", false),
+    TIKTOK("tiktok", "TikTok", setOf("tiktok.com"), "https://www.tiktok.com/", false),
+    DISCORD("discord", "Discord", setOf("discord.com", "discord.gg", "discordapp.com"), "https://discord.com/app", false),
+    REDDIT("reddit", "Reddit", setOf("reddit.com", "redd.it"), "https://www.reddit.com/", false),
+    FACEBOOK("facebook", "Facebook", setOf("facebook.com", "fb.watch", "fb.com"), "https://www.facebook.com/", false, setOf("v", "story_fbid", "id"));
+
+    fun owns(host: String): Boolean = hosts.any { host == it || host.endsWith(".$it") }
+
+    companion object {
+        fun byId(id: String?): SocialPlatform? = entries.firstOrNull { it.id == id }
+        fun supportsAutoObserver(id: String?): Boolean = byId(id)?.autoObserver == true
+    }
+}
+
+/** Kullanıcıya gösterilen metinler: iç kodlar (HTTP_200, INCONCLUSIVE…) ekrana ham çıkmaz. */
+object SocialText {
+    fun evidence(reason: String): String {
+        val parts = reason.split(':')
+        val route = when (parts.firstOrNull()) {
+            "DIRECT_CONTROL" -> "Doğrudan bağlantı"
+            "THROUGH_CANDIDATE" -> "Yöntem üzerinden"
+            "PROBE_TIMEOUT" -> return "Bağlantı testi zaman aşımına uğradı"
+            "BASELINE_TRANSPORT_UNKNOWN" -> return "Başlangıç ölçümü zaman aşımına uğradı"
+            else -> return "Bağlantı testi sonucu belirsiz"
+        }
+        val http = parts.firstOrNull { it.startsWith("HTTP_") }?.removePrefix("HTTP_")?.toIntOrNull()
+        return when {
+            http != null && http in 200..399 -> "$route: sunucuya ulaşıldı (HTTP $http)"
+            http == 429 -> "$route: hız sınırı (HTTP 429)"
+            http != null -> "$route: sunucu yanıt verdi ama hata döndü (HTTP $http)"
+            "TRANSPORT_UNKNOWN" in parts -> "$route: bağlantı kurulamadı"
+            else -> "$route: sonuç belirsiz"
+        }
+    }
+    fun technical(outcome: String): String = when (outcome) {
+        "PASS" -> "Ağ yolu açık"
+        "FAIL" -> "Ağ yolu kapalı"
+        else -> "Belirsiz"
+    }
+    fun verdict(v: Verdict): String = when (v) {
+        Verdict.PASS -> "İçerik açıldı"
+        Verdict.FAIL -> "Engel gözlendi"
+        Verdict.INCONCLUSIVE -> "Belirsiz"
+        Verdict.UNSUPPORTED -> "Otomatik gözlem yok"
+        Verdict.NEEDS_INTERACTION -> "Dokunmanız gerekiyor"
+        Verdict.CANCELLED -> "İptal edildi"
+        Verdict.NOT_RUN -> "—"
+    }
+    fun phase(p: Phase): String = when (p) {
+        Phase.DISABLED -> "Kapalı"
+        Phase.IDLE -> "Hazır"
+        Phase.BASELINING -> "Başlangıç ölçülüyor"
+        Phase.SELECTING, Phase.PREPARING -> "Yöntem hazırlanıyor"
+        Phase.APPLYING -> "Yöntem uygulanıyor"
+        Phase.PROBING -> "Bağlantı test ediliyor"
+        Phase.AUTO_EVALUATING -> "Test penceresi gözleniyor"
+        Phase.WAITING_FOR_USER -> "Yanıtınız bekleniyor"
+        Phase.CANCELLING, Phase.ROLLING_BACK -> "Geri alınıyor"
+        Phase.PAUSED -> "Duraklatıldı"
+        Phase.FINISHED -> "Tamamlandı"
+        Phase.RECOVERY_REQUIRED -> "Kurtarma gerekli"
+    }
+    fun pause(reason: String?): String? = when (reason) {
+        "BUDGET_LIMIT" -> "Bu turun deneme bütçesi doldu."
+        "COOLDOWN" -> "Hedef hız sınırı bildirdi; bekleme süresi dolmadı."
+        "USER_ACTION_REQUIRED" -> "Test penceresinde bir dokunuş gerekiyor."
+        "PERMISSION_REQUIRED" -> "Bazı yöntemler için yerel DPI bağlantısı gerekiyor."
+        "USER_UNABLE_TO_TEST" -> "Test edilemedi olarak işaretlendi."
+        "USER_INACTIVE" -> "Yanıt gelmediği için deneme geri alındı."
+        "CONTEXT_CHANGED" -> "Ağ veya ayarlar değişti; yeniden başlatın."
+        else -> null
     }
 }
 

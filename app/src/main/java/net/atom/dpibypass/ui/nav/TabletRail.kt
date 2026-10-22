@@ -37,7 +37,7 @@ import net.atom.dpibypass.ui.design.rememberHaptics
 @Composable
 fun TabletRail(navController: NavController, modifier: Modifier = Modifier) {
     val backStack by navController.currentBackStackEntryAsState()
-    val current = backStack?.destination?.route ?: Dest.Home.route
+    val current = tabRouteFor(backStack?.destination?.route)
     val haptics = rememberHaptics()
     val shell = LocalShellBackdrop.current
 

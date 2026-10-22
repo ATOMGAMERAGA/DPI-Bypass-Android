@@ -8,6 +8,7 @@ $taskClassPath = $taskDependencies -join ';'
 $taskSources = @(
     "$taskRoot\app\src\main\java\net\atom\dpibypass\social\SocialModels.kt",
     "$taskRoot\app\src\main\java\net\atom\dpibypass\social\ExperimentCoordinator.kt",
+    "$taskRoot\app\src\main\java\net\atom\dpibypass\social\NetworkContextTracker.kt",
     "$taskRoot\app\src\test\java\net\atom\dpibypass\SocialAccessTest.kt",
     "$taskRoot\app\src\test\java\net\atom\dpibypass\SocialCoordinatorTest.kt"
 )

@@ -70,6 +70,7 @@ import net.atom.dpibypass.ui.design.SegmentedControl
 import net.atom.dpibypass.ui.design.StatTile
 import net.atom.dpibypass.ui.design.SwitchRow
 import net.atom.dpibypass.ui.design.VSpace
+import net.atom.dpibypass.ui.social.SocialAccessEntry
 import net.atom.dpibypass.util.AppUsage
 import net.atom.dpibypass.util.DeviceInfo
 import net.atom.dpibypass.util.NotificationUtils
@@ -86,7 +87,7 @@ import net.atom.dpibypass.util.NotificationUtils
 // ---------------------------------------------------------------------------
 
 @Composable
-fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
+fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}, onOpenSocial: () -> Unit = {}) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val activeDns by viewModel.activeDnsServers.collectAsStateWithLifecycle()
     val vodafoneActive by viewModel.vodafoneModeActive.collectAsStateWithLifecycle()
@@ -97,7 +98,8 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}) {
         title = "Ayarlar",
         subtitle = "Bağlantı davranışı, görünüm ve cihaz kısayolları.",
     ) {
-        SocialAccessCard(viewModel)
+        // Sosyal Erişim kendi sayfasında: burada yalnızca durumu özetleyen tek satır.
+        SocialAccessEntry(viewModel, onOpen = onOpenSocial)
         // ---- Hızlı erişim ----
         SectionHeader("Hızlı erişim")
         AppCard(modifier = Modifier.fillMaxWidth()) {
