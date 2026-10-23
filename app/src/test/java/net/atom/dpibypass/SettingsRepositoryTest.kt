@@ -7,6 +7,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import net.atom.dpibypass.data.AppFilterMode
@@ -59,7 +61,9 @@ class SettingsRepositoryTest {
         first.setSocialAccessMode(TestMode.AUTO_BETA)
         first.updateSocialPlatforms { it + "youtube" + "discord" + "not-a-platform" }
         first.setSocialTargetUrl("https://youtu.be/abcdefghijk")
-        scopes.forEach { it.cancel() }; scopes.clear()
+        // Eski DataStore örneği dosyayı tamamen bırakmadan yenisi açılmamalı
+        // (aynı dosya için iki etkin örnek DataStore'da hatadır).
+        scopes.forEach { it.coroutineContext.job.cancelAndJoin() }; scopes.clear()
         val restarted = repo().settings.first()
         assertTrue(restarted.loaded)
         assertTrue(restarted.socialAccessEnabled)
