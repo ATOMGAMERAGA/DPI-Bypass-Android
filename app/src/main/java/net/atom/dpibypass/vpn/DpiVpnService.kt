@@ -27,16 +27,17 @@ import net.atom.dpibypass.data.ConnectionState
 import net.atom.dpibypass.data.OperationMode
 import net.atom.dpibypass.data.Settings
 import net.atom.dpibypass.data.SettingsRepository
-import net.atom.dpibypass.data.AppFilterMode
 import net.atom.dpibypass.dns.DnsPlan
 import net.atom.dpibypass.dns.DnsPlanner
 import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.dns.DohResolver
 import net.atom.dpibypass.engine.ByeDpiProxy
+import net.atom.dpibypass.engine.EngineOwnership
 import net.atom.dpibypass.engine.TProxyService
 import net.atom.dpibypass.isp.IspDetector
 import net.atom.dpibypass.strategy.Strategy
 import net.atom.dpibypass.strategy.StrategyPool
+import net.atom.dpibypass.strategy.StrategyScore
 import net.atom.dpibypass.strategy.StrategyTester
 import net.atom.dpibypass.strategy.Socks5TestClient
 import net.atom.dpibypass.util.NotificationUtils
@@ -88,6 +89,16 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     private var alphaOperation: String? = null
     private var alphaPreviousArgs: Array<String>? = null
     private var alphaInstalledArgs: Array<String>? = null
+    private var alphaStrategyId: String? = null
+    // Sosyal Erişim'de onaylanıp motorun TABANINA alınan plan (bkz. commitAlpha).
+    // Taban değiştiği için tünel yeniden kurulumu ve Vodafone modu değişimi bu
+    // planı korur; yalnız kullanıcının açık "Planı kaldır" komutu geri alır.
+    private var committedOperation: String? = null
+    private var committedPreviousBase: Array<String>? = null
+    private var committedPreviousProfile: ActiveProfile? = null
+    /** Otomatik kipte bu bağlantının ağ anahtarı (taşıyıcı + ISS); manuel kipte null. */
+    private var currentNetworkKey: String? = null
+    private var engineToken: Long? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -106,6 +117,12 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        engineToken?.let { EngineOwnership.release(it) }
+        engineToken = null
+        super.onDestroy()
+    }
+
     override fun onRevoke() {
         Log.i(TAG, "VPN izni geri alındı")
         lifecycleScope.launch { stop() }
@@ -120,9 +137,17 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         }
         // Foreground'a erken gir (ANR/limit riskini azalt), sonra çalış.
         goForeground(getString(R.string.status_connecting), connected = false)
+        VpnState.updateFailure(null)
 
         try {
+            // Native motor süreçte TEKİLDİR. Kullanıcının bağlanma komutu önceliklidir:
+            // süren strateji testi iptal ettirilir ve kaynaklarını bırakması beklenir.
+            if (engineToken == null) engineToken = EngineOwnership.acquireForVpn()
+                ?: throw IllegalStateException("ENGINE_BUSY")
             val settings = settingsRepo.settings.first()
+            // "Yalnızca seçili" kipinde kapsamda kurulu uygulama yoksa Android tüm
+            // trafiği tünele alırdı: kurulmaz, neden açıkça gösterilir.
+            if (scopeDecision(settings) == ScopeDecision.EmptyInclude) throw IllegalStateException("EMPTY_INCLUDE_SCOPE")
             persistentIndicator = settings.samsungVpnIndicator
             // DNS planı strateji testinden ÖNCE kurulur: test de aynı DoH'u kullanır.
             applyDnsPlan(settings)
@@ -132,6 +157,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
                 plan.strategy.name,
                 plan.ispName,
                 plan.latencyMs?.toInt(),
+                plan.coverage,
             )
             currentBaseArgs = plan.strategy.toArgv(PROXY_PORT)
             currentVodafoneMode = settings.vodafoneUnlimitedMode
@@ -146,6 +172,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
             VpnState.update(ConnectionState.Connected, currentProfile)
             SocialAccessRuntime.adapter.engine = this
+            SocialAccessRuntime.engineStarted(plan.strategy.id)
             VpnState.updateVodafoneMode(currentVodafoneMode)
             connectedSince = System.currentTimeMillis()
             goForeground(
@@ -158,11 +185,16 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         } catch (e: Exception) {
             Log.e(TAG, "Başlatma başarısız", e)
             VpnState.update(ConnectionState.Failed, null)
-            stop()
+            VpnState.updateFailure(when (e.message) {
+                "EMPTY_INCLUDE_SCOPE" -> "\"Yalnızca seçili\" kipinde kurulu, seçili uygulama yok. Uygulamalar ekranından seçin ya da \"Tümü\"ne geçin; aksi hâlde Android bütün trafiği tünele alırdı."
+                "ENGINE_BUSY" -> "Strateji testi motoru bırakmadı; birkaç saniye sonra yeniden deneyin."
+                else -> "Tünel kurulamadı. Tekrar deneyin; sürerse VPN iznini kontrol edin."
+            })
+            stop(keepFailure = true)
         }
     }
 
-    private suspend fun stop() {
+    private suspend fun stop(keepFailure: Boolean = false) {
         Log.i(TAG, "Durduruluyor")
         SocialAccessRuntime.vpnStopped()
         watchdogJob?.cancel()
@@ -180,8 +212,12 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
                 stopping = false
             }
         }
-        VpnState.update(ConnectionState.Disconnected, null)
+        if (!keepFailure) VpnState.update(ConnectionState.Disconnected, null)
         appliedConfig = null
+        committedOperation = null; committedPreviousBase = null; committedPreviousProfile = null
+        alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null; alphaStrategyId = null
+        engineToken?.let { EngineOwnership.release(it) }
+        engineToken = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -242,32 +278,20 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         }
     }
 
-    /** TUN'u etkileyen ayarlar. Yalnızca bunlar değişince yeniden kurulur. */
-    private data class TunnelConfig(
-        val provider: String,
-        val customDoh: String,
-        val disableQuic: Boolean,
-        val vodafoneMode: Boolean,
-        val appFilterMode: AppFilterMode,
-        val selectedApps: Set<String>,
-    ) {
-        companion object {
-            fun from(settings: Settings) = TunnelConfig(
-                settings.dohProvider.name,
-                settings.customDohUrl.trim(),
-                settings.disableQuic,
-                settings.vodafoneUnlimitedMode,
-                settings.appFilterMode,
-                settings.selectedApps,
-            )
-        }
-    }
-
     private suspend fun reconfigureTunnel() {
         if (VpnState.state.value != ConnectionState.Connected) return
+        // Süren geçici Sosyal Erişim denemesi geri alınır; onaylı plan motorun
+        // tabanında olduğu için korunur. Kurtarma gerekse bile kullanıcının yeni
+        // DNS/kapsam/QUIC ayarı UYGULANIR (eskiden burada sessizce atlanıyordu).
         SocialAccessRuntime.settingsChanging()
-        if (SocialAccessRuntime.coordinator.state.value.phase == net.atom.dpibypass.social.Phase.RECOVERY_REQUIRED) return
         val settings = settingsRepo.settings.first()
+        if (scopeDecision(settings) == ScopeDecision.EmptyInclude) {
+            Log.w(TAG, "Yalnızca seçili kipinde uygulama kalmadı; tünel kapatılıyor")
+            VpnState.update(ConnectionState.Failed, null)
+            VpnState.updateFailure("\"Yalnızca seçili\" listesinde kurulu uygulama kalmadı; bütün trafiği tünele almamak için bağlantı kapatıldı.")
+            lifecycleScope.launch { stop(keepFailure = true) }
+            return
+        }
         applyDnsPlan(settings)
         var failed = false
         mutex.withLock {
@@ -282,6 +306,9 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
                 if (modeChanged) {
                     stopProxy()
                     currentVodafoneMode = settings.vodafoneUnlimitedMode
+                    // Taban (onaylı plan dahil) korunur; yalnız Vodafone ekleri değişir.
+                    // Geri alınamamış bir deneme kaldıysa artık geçersizdir.
+                    alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null; alphaStrategyId = null
                     currentArgs = VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode)
                     startProxy(currentArgs)
                 }
@@ -309,6 +336,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         val strategy: Strategy,
         val latencyMs: Long?,
         val ispName: String,
+        val coverage: String? = null,
     )
 
     /**
@@ -327,6 +355,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
      */
     private suspend fun resolvePlan(settings: Settings): ConnectionPlan {
         // 1) Gelişmiş serbest argümanlar
+        currentNetworkKey = null
         if (settings.advancedEnabled && settings.advancedArgs.isNotBlank()) {
             val custom = Strategy(
                 "CUSTOM", getString(R.string.strategy_custom), "",
@@ -356,7 +385,11 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         // alana çıplak IP yazılmış olabilir); ham ayarı tekrar ayrıştırmayız.
         val doh = DohResolver(currentDohUrl)
         val tester = StrategyTester(lifecycleScope, doh, settings.vodafoneUnlimitedMode)
-        val hosts = StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings)
+        // Çoklu uygulama: Sosyal Erişim'de seçili platformların alan adları da aynı
+        // doğrulamaya girer; kazanan hepsine birlikte bakılarak seçilir.
+        val social = if (settings.socialAccessEnabled) SocialAccessRuntime.probeHosts(settings.socialPlatforms) else emptyList()
+        val hosts = (StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings) + social).distinct()
+        currentNetworkKey = networkKey
 
         // --- 1. aşama: hatırlanan kazananı doğrula ---
         val remembered = runCatching { settingsRepo.networkProfile(networkKey) }.getOrNull()
@@ -367,7 +400,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             val latency = tester.verify(rememberedStrategy, hosts)
             if (latency != null) {
                 Log.i(TAG, "Hızlı yol: ${rememberedStrategy.id} doğrulandı (${latency} ms)")
-                return ConnectionPlan(rememberedStrategy, latency, ispName)
+                return ConnectionPlan(rememberedStrategy, latency, ispName, tester.lastBest?.let(StrategyScore::coverageLabel))
             }
             Log.i(TAG, "Hatırlanan ${rememberedStrategy.id} artık çalışmıyor; yarış başlıyor")
         }
@@ -384,7 +417,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             // Ağ profiline kaydet: aynı ağa bir daha bağlanırken doğrudan hızlı yol.
             runCatching { settingsRepo.saveNetworkProfile(networkKey, best.first.id) }
             Log.i(TAG, "Yarış kazananı: ${best.first.id} (${best.second} ms)")
-            return ConnectionPlan(best.first, best.second, ispName)
+            return ConnectionPlan(best.first, best.second, ispName, tester.lastBest?.let(StrategyScore::coverageLabel))
         }
 
         // Hiçbiri çalışmadı → yine de en olası preset ile dene.
@@ -505,27 +538,29 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         return builder
     }
 
+    /** Uygulama kapsamı kararı (saf, birim testli: [AppScope]). Kendi paketimiz daima tünel dışında. */
+    private fun scopeDecision(settings: Settings): ScopeDecision = AppScope.decide(
+        settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, applicationContext.packageName,
+    ) { pkg -> runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess }
+
     /** Uygulama ayırma (split tunneling). Kendi paketini daima hariç tut (döngü olmasın). */
     private fun applySplitTunneling(builder: Builder, settings: Settings) {
-        val self = applicationContext.packageName
-        when (VodafoneModePolicy.filterMode(settings.appFilterMode, settings.vodafoneUnlimitedMode)) {
-            AppFilterMode.All -> {
-                safeDisallow(builder, self)
-            }
-            AppFilterMode.Include -> {
-                // Yalnızca seçili uygulamalar tünelde; kendi paketimizi eklemeyerek hariç tutuyoruz.
-                settings.selectedApps.filter { it != self }.forEach { pkg ->
+        when (val decision = scopeDecision(settings)) {
+            is ScopeDecision.AllExcept -> decision.disallowed.forEach { safeDisallow(builder, it) }
+            is ScopeDecision.Only -> {
+                var added = 0
+                decision.allowed.forEach { pkg ->
                     try {
-                        builder.addAllowedApplication(pkg)
+                        builder.addAllowedApplication(pkg); added++
                     } catch (e: PackageManager.NameNotFoundException) {
                         Log.w(TAG, "Uygulama bulunamadı: $pkg")
                     }
                 }
+                // Karar ile kurulum arasında paket kaldırıldıysa izin listesi boş
+                // kalır ve Android tüm trafiği alırdı.
+                check(added > 0) { "EMPTY_INCLUDE_SCOPE" }
             }
-            AppFilterMode.Exclude -> {
-                safeDisallow(builder, self)
-                settings.selectedApps.filter { it != self }.forEach { safeDisallow(builder, it) }
-            }
+            ScopeDecision.EmptyInclude -> throw IllegalStateException("EMPTY_INCLUDE_SCOPE")
         }
     }
 
@@ -608,7 +643,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             // Undo is durable before the first native stop/start can mutate anything.
             record.put("previousArgs", JSONArray(currentArgs.toList())).put("installedArgs", JSONArray(args.toList()))
             SocialAccessRuntime.adapter.journal.write(record)
-            alphaPreviousArgs = currentArgs.copyOf(); alphaInstalledArgs = args.copyOf(); alphaOperation = operationId
+            alphaPreviousArgs = currentArgs.copyOf(); alphaInstalledArgs = args.copyOf(); alphaOperation = operationId; alphaStrategyId = strategyId
             stopProxy()
             currentArgs = args
             startProxy(currentArgs)
@@ -625,7 +660,49 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         if (!currentArgs.contentEquals(installed) && !currentArgs.contentEquals(previous)) return@withLock false
         stopProxy(); currentArgs = previous; startProxy(currentArgs)
         val restored = currentArgs.contentEquals(previous) && waitForAlphaProxy()
-        if (restored) { alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null }
+        if (restored) { alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null; alphaStrategyId = null }
+        restored
+    } } ?: false
+
+    /**
+     * Uygulanmış ve onaylanmış adayı motorun TABANI yapar. Bundan sonra tünel
+     * yeniden kurulumu, Vodafone modu değişimi ve watchdog bu ayarla çalışır;
+     * sonraki denemeler bu planın üstüne kurulur ve geri alındığında buna döner.
+     * Otomatik kipte bu ağın profiline de yazılır (manuel kipte kullanıcının
+     * seçimi sessizce değiştirilmez).
+     */
+    override suspend fun commitAlpha(operationId: String): Boolean = mutex.withLock {
+        if (alphaOperation != operationId) return@withLock false
+        val installed = alphaInstalledArgs ?: return@withLock false
+        if (!currentArgs.contentEquals(installed)) return@withLock false
+        val strategy = StrategyPool.byId(alphaStrategyId) ?: return@withLock false
+        committedPreviousBase = currentBaseArgs.copyOf()
+        committedPreviousProfile = currentProfile
+        committedOperation = operationId
+        currentBaseArgs = strategy.toArgv(PROXY_PORT)
+        alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null; alphaStrategyId = null
+        currentProfile = currentProfile?.copy(strategyId = strategy.id, strategyName = strategy.name, latencyMs = null, coverage = null, socialPlan = true)
+        VpnState.update(ConnectionState.Connected, currentProfile)
+        currentNetworkKey?.let { key -> runCatching { settingsRepo.saveNetworkProfile(key, strategy.id) } }
+        true
+    }
+
+    /** Onaylı planı, kurulmadan önceki tabana döndürür. Dışarıdan değişmiş ayarı ezmez. */
+    override suspend fun revertCommittedAlpha(operationId: String): Boolean = withTimeoutOrNull(15_000) { mutex.withLock {
+        if (committedOperation == null) return@withLock true
+        if (committedOperation != operationId || alphaOperation != null) return@withLock false
+        val previousBase = committedPreviousBase ?: return@withLock false
+        if (!currentArgs.contentEquals(VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode))) return@withLock false
+        stopProxy()
+        currentBaseArgs = previousBase
+        currentArgs = VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode)
+        startProxy(currentArgs)
+        val restored = waitForAlphaProxy()
+        if (restored) {
+            currentProfile = committedPreviousProfile ?: currentProfile
+            VpnState.update(ConnectionState.Connected, currentProfile)
+            committedOperation = null; committedPreviousBase = null; committedPreviousProfile = null
+        }
         restored
     } } ?: false
 

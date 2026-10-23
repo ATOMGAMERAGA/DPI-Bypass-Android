@@ -5,10 +5,12 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import net.atom.dpibypass.dns.DnsPlan
@@ -17,6 +19,7 @@ import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.isp.Isp
 import net.atom.dpibypass.util.DeviceInfo
 import org.json.JSONObject
+import java.io.IOException
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "dpi_settings")
 
@@ -46,6 +49,20 @@ data class Settings(
     val samsungVpnIndicator: Boolean = false,
     val socialAccessEnabled: Boolean = false,
     val socialAccessMode: net.atom.dpibypass.social.TestMode = net.atom.dpibypass.social.TestMode.MANUAL,
+    // Sosyal Erişim'de birlikte çalışması istenen platformlar (kimlikler) ve
+    // isteğe bağlı belirli içerik bağlantısı. Süreç yeniden başlayınca korunur.
+    val socialPlatforms: Set<String> = emptySet(),
+    val socialTargetUrl: String = "",
+    // "Sadece Discord" öncesindeki uygulama kapsamı yedeği var mı? (geri alınabilir)
+    val scopeBackupAvailable: Boolean = false,
+    /**
+     * Değer DataStore'dan GERÇEKTEN okundu mu? `stateIn` başlangıç değeri olan
+     * varsayılan `Settings()` için false'tur: arayüz o ilk değeri kullanıcının
+     * kapalı/boş tercihi gibi uygulamamalı.
+     */
+    val loaded: Boolean = false,
+    /** Ayar dosyası okunamadı; varsayılanlar gösteriliyor (sessizce değil). */
+    val readError: Boolean = false,
 ) {
     /**
      * Etkin DoH endpoint URL'i (özel varsa o, yoksa seçili sağlayıcı).
@@ -84,9 +101,19 @@ data class NetworkProfile(val strategyId: String, val savedAtMs: Long) {
 private const val KEY_STRATEGY = "id"
 private const val KEY_SAVED_AT = "at"
 
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(
+    private val store: DataStore<Preferences>,
+    private val samsungDefault: () -> Boolean = DeviceInfo::isSamsung,
+) {
+    constructor(context: Context) : this(context.applicationContext.dataStore)
 
-    val settings: Flow<Settings> = context.dataStore.data.map { p -> p.toSettings() }
+    /**
+     * Okuma hatasında akış çökmez ve sessizce "her şey kapalı" da denmez:
+     * varsayılanlar [Settings.readError] işaretiyle yayınlanır.
+     */
+    val settings: Flow<Settings> = store.data
+        .map { p -> p.toSettings() }
+        .catch { e -> if (e is IOException) emit(emptyPreferences().toSettings().copy(readError = true)) else throw e }
 
     private fun Preferences.toSettings(): Settings = Settings(
         operationMode = OperationMode.fromName(this[Keys.OPERATION_MODE]),
@@ -110,9 +137,14 @@ class SettingsRepository(private val context: Context) {
         // Samsung'da VARSAYILAN AÇIK: ayar zaten yalnızca Samsung'da görünüyor ve
         // Now Bar göstergesi bu cihazlarda beklenen davranış. Kullanıcı kapatana
         // kadar canlı gösterge istenir.
-        samsungVpnIndicator = this[Keys.SAMSUNG_VPN_INDICATOR] ?: DeviceInfo.isSamsung(),
+        samsungVpnIndicator = this[Keys.SAMSUNG_VPN_INDICATOR] ?: samsungDefault(),
         socialAccessEnabled = runCatching { this[Keys.SOCIAL_ENABLED] }.getOrNull() ?: false,
         socialAccessMode = net.atom.dpibypass.social.TestMode.parse(runCatching { this[Keys.SOCIAL_MODE] }.getOrNull()),
+        socialPlatforms = runCatching { this[Keys.SOCIAL_PLATFORMS] }.getOrNull()
+            ?.filter { net.atom.dpibypass.social.SocialPlatform.byId(it) != null }?.toSet() ?: emptySet(),
+        socialTargetUrl = runCatching { this[Keys.SOCIAL_TARGET_URL] }.getOrNull() ?: "",
+        scopeBackupAvailable = this[Keys.SCOPE_BACKUP_MODE] != null,
+        loaded = true,
     )
 
     suspend fun setOperationMode(mode: OperationMode) = put(Keys.OPERATION_MODE, mode.name)
@@ -124,7 +156,53 @@ class SettingsRepository(private val context: Context) {
     suspend fun setCustomDohUrl(url: String) = put(Keys.CUSTOM_DOH_URL, url)
     suspend fun setAppFilterMode(mode: AppFilterMode) = put(Keys.APP_FILTER_MODE, mode.name)
     suspend fun setSelectedApps(apps: Set<String>) =
-        context.dataStore.edit { it[Keys.SELECTED_APPS] = apps }
+        store.edit { it[Keys.SELECTED_APPS] = apps }
+
+    /**
+     * Seçili uygulama listesini DataStore İÇİNDE okuyup-değiştirip yazar. Eskiden
+     * arayüz eski bir StateFlow anlık görüntüsünden yeni kümeyi kurup tümünü
+     * yazıyordu; hızlı art arda iki dokunuşta biri kayboluyordu (lost update).
+     */
+    suspend fun updateSelectedApps(transform: (Set<String>) -> Set<String>) =
+        store.edit { it[Keys.SELECTED_APPS] = transform(it[Keys.SELECTED_APPS] ?: emptySet()) }
+
+    /**
+     * "Sadece Discord": kapsam ve liste TEK yazımda değişir; önceki kapsam
+     * yedeklenir ki kullanıcının kendi listesi kalıcı olarak silinmesin.
+     * Zaten Sadece Discord ise yedek ezilmez.
+     */
+    suspend fun enableOnlyApps(apps: Set<String>) = store.edit { p ->
+        val mode = AppFilterMode.fromName(p[Keys.APP_FILTER_MODE])
+        val current = p[Keys.SELECTED_APPS] ?: emptySet()
+        if (!(mode == AppFilterMode.Include && current == apps) && p[Keys.SCOPE_BACKUP_MODE] == null) {
+            p[Keys.SCOPE_BACKUP_MODE] = mode.name
+            p[Keys.SCOPE_BACKUP_APPS] = current
+        }
+        p[Keys.OPERATION_MODE] = OperationMode.Auto.name
+        p[Keys.APP_FILTER_MODE] = AppFilterMode.Include.name
+        p[Keys.SELECTED_APPS] = apps
+    }
+
+    /** [enableOnlyApps] öncesindeki kapsamı geri yükler; yedek yoksa bir şey yapmaz. */
+    suspend fun restoreScopeBackup() = store.edit { p ->
+        val mode = p[Keys.SCOPE_BACKUP_MODE] ?: return@edit
+        p[Keys.APP_FILTER_MODE] = mode
+        p[Keys.SELECTED_APPS] = p[Keys.SCOPE_BACKUP_APPS] ?: emptySet()
+        p.remove(Keys.SCOPE_BACKUP_MODE); p.remove(Keys.SCOPE_BACKUP_APPS)
+    }
+
+    /**
+     * Paketleri etkin kapsama alır (tek adımlı düzeltme): "Yalnızca seçili"de
+     * listeye ekler, "Seçili hariç"te listeden çıkarır, "Tümü"nde dokunmaz.
+     */
+    suspend fun bringIntoScope(packages: Set<String>) = store.edit { p ->
+        val current = p[Keys.SELECTED_APPS] ?: emptySet()
+        when (AppFilterMode.fromName(p[Keys.APP_FILTER_MODE])) {
+            AppFilterMode.Include -> p[Keys.SELECTED_APPS] = current + packages
+            AppFilterMode.Exclude -> p[Keys.SELECTED_APPS] = current - packages
+            AppFilterMode.All -> Unit
+        }
+    }
     suspend fun setAutoConnectOnBoot(v: Boolean) = put(Keys.AUTO_CONNECT_BOOT, v)
     suspend fun setVodafoneUnlimitedMode(v: Boolean) = put(Keys.VODAFONE_UNLIMITED_MODE, v)
     suspend fun setTheme(t: ThemePref) = put(Keys.THEME, t.name)
@@ -135,6 +213,9 @@ class SettingsRepository(private val context: Context) {
     suspend fun setSamsungVpnIndicator(v: Boolean) = put(Keys.SAMSUNG_VPN_INDICATOR, v)
     suspend fun setSocialAccessEnabled(v: Boolean) = put(Keys.SOCIAL_ENABLED, v)
     suspend fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = put(Keys.SOCIAL_MODE, v.name)
+    suspend fun updateSocialPlatforms(transform: (Set<String>) -> Set<String>) =
+        store.edit { it[Keys.SOCIAL_PLATFORMS] = transform(it[Keys.SOCIAL_PLATFORMS] ?: emptySet()) }
+    suspend fun setSocialTargetUrl(v: String) = put(Keys.SOCIAL_TARGET_URL, v.take(2048))
 
     /**
      * Ağ profili: bir ağ anahtarına (taşıyıcı + ISS) o ağda KAZANMIŞ stratejiyi
@@ -150,7 +231,7 @@ class SettingsRepository(private val context: Context) {
         strategyId: String,
         savedAtMs: Long = System.currentTimeMillis(),
     ) {
-        context.dataStore.edit { prefs ->
+        store.edit { prefs ->
             val json = JSONObject(prefs[Keys.NETWORK_PROFILES] ?: "{}")
             json.put(
                 networkKey,
@@ -161,7 +242,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun networkProfile(networkKey: String): NetworkProfile? {
-        val prefs = context.dataStore.data.first()
+        val prefs = store.data.first()
         val json = runCatching { JSONObject(prefs[Keys.NETWORK_PROFILES] ?: "{}") }
             .getOrElse { return null }
         return when (val entry = json.opt(networkKey)) {
@@ -177,14 +258,18 @@ class SettingsRepository(private val context: Context) {
     }
 
     private suspend fun put(key: Preferences.Key<String>, value: String) =
-        context.dataStore.edit { it[key] = value }
+        store.edit { it[key] = value }
 
     private suspend fun put(key: Preferences.Key<Boolean>, value: Boolean) =
-        context.dataStore.edit { it[key] = value }
+        store.edit { it[key] = value }
 
     private object Keys {
         val SOCIAL_ENABLED = booleanPreferencesKey("social_access_enabled")
         val SOCIAL_MODE = stringPreferencesKey("social_access_mode")
+        val SOCIAL_PLATFORMS = stringSetPreferencesKey("social_access_platforms")
+        val SOCIAL_TARGET_URL = stringPreferencesKey("social_access_target_url")
+        val SCOPE_BACKUP_MODE = stringPreferencesKey("scope_backup_mode")
+        val SCOPE_BACKUP_APPS = stringSetPreferencesKey("scope_backup_apps")
         val OPERATION_MODE = stringPreferencesKey("operation_mode")
         val SELECTED_ISP = stringPreferencesKey("selected_isp")
         val SELECTED_STRATEGY = stringPreferencesKey("selected_strategy")

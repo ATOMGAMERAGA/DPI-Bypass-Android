@@ -199,8 +199,11 @@ private fun AppRoot(
                     )
                 }
 
-                // İlk açılış kurulum sihirbazı — her şeyin üstüne biner.
-                if (!settings.onboardingDone) {
+                // İlk açılış kurulum sihirbazı — her şeyin üstüne biner. Ayarlar
+                // okunmadan önceki varsayılan (onboardingDone=false) gerçek değer
+                // sayılmaz: eski kullanıcıya sihirbaz bir an görünüp "Sadece
+                // Discord"a yanlışlıkla dokunulmasına yol açmasın.
+                if (settings.loaded && !settings.onboardingDone) {
                     OnboardingOverlay(
                         discordInstalled = discordInstalled,
                         brandName = DeviceInfo.brandName(),

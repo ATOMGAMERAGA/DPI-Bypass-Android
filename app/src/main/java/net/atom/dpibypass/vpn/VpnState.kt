@@ -35,6 +35,14 @@ object VpnState {
     private val _vodafoneModeActive = MutableStateFlow(false)
     val vodafoneModeActive: StateFlow<Boolean> = _vodafoneModeActive.asStateFlow()
 
+    // Son bağlantı hatasının kullanıcıya gösterilecek nedeni (iç kod/stack trace değil).
+    private val _failureReason = MutableStateFlow<String?>(null)
+    val failureReason: StateFlow<String?> = _failureReason.asStateFlow()
+
+    fun updateFailure(reason: String?) {
+        _failureReason.value = reason
+    }
+
     fun updateVodafoneMode(active: Boolean) {
         _vodafoneModeActive.value = active
     }
@@ -55,6 +63,7 @@ object VpnState {
 
     private fun applyState(state: ConnectionState) {
         if (state == ConnectionState.Connected) {
+            _failureReason.value = null
             // Yeniden "Connected" bildirimi gelirse (ör. watchdog toparlaması)
             // sayaç sıfırlanmaz; kesinti olmadıysa süre akmaya devam eder.
             if (_connectedSince.value == 0L) _connectedSince.value = System.currentTimeMillis()

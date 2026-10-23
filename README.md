@@ -23,7 +23,7 @@ Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildi
 | Yalnızca seçili | Sadece listede işaretlediğin uygulamalar tünele girer. |
 | Seçili hariç | İşaretlediğin uygulamalar tünelin dışında kalır. |
 
-İlk kurulumda “Sadece Discord” seçtiysen kapsam buna göre ayarlanır. Daha sonra **Uygulamalar** sekmesinden değiştirebilirsin. Kapsam telefonun kendi uygulamaları içindir; hotspot ile bağlanan başka bir cihazın trafiğini kapsamaz.
+İlk kurulumda “Sadece Discord” seçtiysen kapsam buna göre ayarlanır ve önceki kapsamın saklanır; ana ekrandaki **Sadece Discord** kısayoluna açıkken tekrar dokunmak önceki kapsamı geri getirir. Daha sonra **Uygulamalar** sekmesinden de değiştirebilirsin. “Yalnızca seçili” kipinde listede kurulu uygulama kalmazsa Android bütün trafiği tünele alacağı için bağlantı kurulmaz ve nedeni ana ekranda yazılır. Kapsam telefonun kendi uygulamaları içindir; hotspot ile bağlanan başka bir cihazın trafiğini kapsamaz.
 
 ## Bir şey çalışmıyorsa
 
@@ -34,14 +34,16 @@ Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildi
 | DNS veya sesli görüşme bozuldu | **Ayarlar** bölümündeki **UDP/QUIC'i tünelde düşür** seçeneğini kapat. Bu ayar DNS sorgularını ve UDP kullanan görüşmeleri etkileyebilir. |
 | Telefon uygulamayı arka planda durduruyor | **Ayarlar** bölümündeki pil optimizasyonu yönlendirmesini kullan. Gerekirse uygulamayı tekrar açıp bağlan. |
 | Ağ değişince bağlantı bozuldu | Bağlantıyı kapatıp yeniden aç; otomatik mod yeni ağ için yöntemi tekrar değerlendirsin. |
+| Bir uygulama çalışıyor, diğeri açılmıyor | **Ayarlar → Sosyal Erişim**'de ikisini de seç ve **Ortak yöntem ara**'yı kullan. Çalışan uygulamayı bozan bir yöntem otomatik reddedilir. Uygulama “Kapsam dışı” görünüyorsa **Kapsama ekle**'ye dokun. |
 
 Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-Android/issues) sayfasında telefon modeli, Android sürümü, operatör, Wi-Fi/mobil veri türü ve ekranda görünen hata ile bildirebilirsin. Hesap, parola veya kişisel trafik kaydı paylaşma.
 
 ## Neler sunuyor?
 
-- **Otomatik yöntem:** Bağlı olduğun ağa göre çalışabilen DPI aşma stratejilerini dener ve birini seçer. **Mod** sekmesinden elle seçim de yapabilirsin.
+- **Otomatik yöntem:** Bağlı olduğun ağa göre çalışabilen DPI aşma stratejilerini dener ve birini seçer. Önce kaç hedefin açıldığına (kapsama), sonra en yavaş hedefin TLS el sıkışma süresine bakar; gösterilen süre uygulamanın ping'i ya da hızı değildir. Sosyal Erişim'de seçili uygulamaların alan adları da bu doğrulamaya katılır. **Mod** sekmesinden elle seçim de yapabilirsin.
 - **DNS seçenekleri:** Cloudflare, AdGuard, Google veya özel adres. Ayar değişince açık tünel yeniden yapılandırılır.
 - **Uygulama kapsamı:** Tüm uygulamalar, yalnızca seçilenler veya seçilenler hariç.
+- **Sosyal Erişim (Alpha):** YouTube, Instagram, X, TikTok, Discord, Reddit, Facebook, Telegram, WhatsApp, Signal, Twitch, Snapchat ya da kendi verdiğin bir alan adı için **birlikte çalışan ortak** yerel DPI planını arar. Her yöntem seçili bütün uygulamalarda, yöntemin gerçek yolundan (yerel motor) ölçülür; çalışan bir uygulamayı bozan yöntem reddedilir. Onaylanan plan DNS/QUIC/kapsam değişikliğinde kaybolmaz, yalnızca kısa bir yeniden doğrulama yapılır. Ağ yolu, içerik, medya ve ses ayrı gösterilir: ağ yolunun açılması içeriğin ya da sesli görüşmenin çalıştığını kanıtlamaz; bunlar için onayın istenir. Ayrıntılar: [docs/social-access-alpha.md](docs/social-access-alpha.md).
 - **Hızlı Panel ve bildirim:** Uygulamaya dönmeden bağlantıyı yönetme.
 - **Tablet düzeni:** Geniş ekranlarda etiketli yan gezinme ve okunabilir genişlikte içerik; telefonun alt gezinmesi korunur.
 - **İsteğe bağlı otomatik başlatma:** **Ayarlar → Cihaz açılınca otomatik bağlan**. Android'in VPN izni önceden verilmiş olmalı.
@@ -57,6 +59,7 @@ Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-Androi
 git clone --recurse-submodules https://github.com/ATOMGAMERAGA/DPI-Bypass-Android.git
 cd DPI-Bypass-Android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
+node --test tests/observer.test.cjs
 ```
 
 Windows'ta son satır için `gradlew.bat` kullan. Submodüller eksikse `git submodule update --init --recursive` çalıştır. Debug APK `app/build/outputs/apk/debug/` altında oluşur; son kullanıcıya dağıtılacak sürüm yerine geçmez.
