@@ -425,7 +425,8 @@ private fun LiveTestCard(
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
                                 Text(
-                                    text = "Ölçülen gecikme: ${winner?.latencyMs ?: "?"} ms — bu strateji kaydedildi.",
+                                    text = "${winner?.let { net.atom.dpibypass.strategy.StrategyScore.coverageLabel(it) } ?: ""} · en yavaş TLS el sıkışması ${winner?.latencyMs ?: "?"} ms" +
+                                        (if (winner?.fullCoverage == false) " — tam kapsama değil." else "") + " Bu strateji kaydedildi.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

@@ -104,6 +104,7 @@ fun HomeScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val connectedSince by viewModel.connectedSince.collectAsStateWithLifecycle()
     val network by viewModel.network.collectAsStateWithLifecycle()
+    val failure by viewModel.connectionFailure.collectAsStateWithLifecycle()
 
     // Bağlantı durumu her değiştiğinde ağ yeniden çözülür: Wi-Fi'dan mobile
     // geçmiş olabiliriz ve gösterilen sağlayıcı bayatlamamalı.
@@ -247,6 +248,30 @@ fun HomeScreen(
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
+                    // Bağlantı kurulamadıysa nedeni (iç kod değil, okunur açıklama).
+                    failure?.takeIf { state == ConnectionState.Failed }?.let {
+                        VSpace(6.dp)
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        )
+                    }
+                    // Sosyal Erişim planı motorun tabanını değiştirdiyse ve kapsamı göster.
+                    profile?.takeIf { state == ConnectionState.Connected && (it.socialPlan || it.coverage != null) }?.let {
+                        VSpace(6.dp)
+                        Text(
+                            text = listOfNotNull(
+                                if (it.socialPlan) "Sosyal Erişim planı etkin (${it.strategyId})" else null,
+                                it.coverage?.let { c -> "Doğrulama: $c" },
+                            ).joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
 
                 VSpace(28.dp)
@@ -296,7 +321,8 @@ fun HomeScreen(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             StatTile(
-                                label = "Gecikme",
+                                // En yavaş hedefin TLS el sıkışması; uygulamanın ping'i değildir.
+                                label = "TLS el sıkışma",
                                 value = profile?.latencyMs?.let { "$it ms" } ?: "—",
                                 icon = Icons.Rounded.Speed,
                                 valueColor = if (profile?.latencyMs != null) accent else MaterialTheme.colorScheme.onSurface,
@@ -340,12 +366,17 @@ fun HomeScreen(
                         QuickAction(
                             icon = Icons.Rounded.Forum,
                             title = "Sadece Discord",
-                            caption = if (discordOnly) "Açık" else "Tek dokunuşla kur",
+                            // Açıkken dokunmak önceki uygulama kapsamını geri yükler:
+                            // kullanıcının kendi listesi kalıcı olarak silinmez.
+                            caption = if (discordOnly) {
+                                if (settings.scopeBackupAvailable) "Açık · dokun: önceki kapsam" else "Açık"
+                            } else "Tek dokunuşla kur",
                             selected = discordOnly,
                             modifier = Modifier.weight(1f),
                             onClick = {
                                 haptics.confirm()
-                                viewModel.enableDiscordOnlyMode()
+                                if (discordOnly && settings.scopeBackupAvailable) viewModel.restoreScopeBackup()
+                                else viewModel.enableDiscordOnlyMode()
                             },
                         )
                         QuickAction(

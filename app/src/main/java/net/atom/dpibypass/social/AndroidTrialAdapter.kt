@@ -3,6 +3,9 @@ package net.atom.dpibypass.social
 import android.content.Context
 import android.content.Intent
 import android.net.*
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.AtomicFile
 import kotlinx.coroutines.*
@@ -20,7 +23,9 @@ import java.net.Proxy
 import java.net.InetAddress
 import java.net.Socket
 import java.net.SocketAddress
+import java.net.URI
 import java.net.UnknownHostException
+import java.util.concurrent.ConcurrentHashMap
 import javax.net.SocketFactory
 import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
@@ -33,6 +38,10 @@ interface AlphaEngine {
     fun resolveAlphaHost(host: String): List<String>
     suspend fun applyAlpha(strategyId: String, operationId: String)
     suspend fun rollbackAlpha(operationId: String): Boolean
+    /** Uygulanmış adayı motorun kalıcı tabanı yapar (ayar değişiminde korunur). */
+    suspend fun commitAlpha(operationId: String): Boolean
+    /** [commitAlpha] ile kurulan planı, kurulmadan önceki tabana döndürür. */
+    suspend fun revertCommittedAlpha(operationId: String): Boolean
 }
 
 /** Separate, app-private, fsync'd recovery record. No URL, account data or network IDs. */
@@ -50,7 +59,10 @@ class AlphaJournal(context: Context) {
         val record = old?.takeIf { it.optString("operationId") == operation } ?: JSONObject().put("schemaVersion", 2).put("operationId", operation)
         record.put("stage", stage).put("candidateId", candidate?.id ?: "")
         write(record)
-        if (stage == "ROLLED_BACK") file.delete()
+        // KEPT: işlem tamamlandı ve (DPI adayında) motorun tabanına alındı; geri alınacak
+        // geçici mutasyon kalmadı. Kayıt bırakılırsa sonraki hedefin denemesi
+        // "çözülmemiş işlem" diye engelleniyordu.
+        if (stage == "ROLLED_BACK" || stage == "KEPT") file.delete()
     }
     @Synchronized fun clearAfterProcessRecovery() { file.delete() }
 }
@@ -60,12 +72,38 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
     private val corrections = AtomicFile(File(app.noBackupFilesDir, "social-access-observer-corrections.json"))
     private val history = AtomicFile(File(app.noBackupFilesDir, "social-access-history.json"))
     private val cooldown = AtomicFile(File(app.noBackupFilesDir, "social-access-cooldown.json"))
-    override fun cooldownRemainingMillis(): Long = runCatching {
-        (JSONObject(cooldown.openRead().bufferedReader().use { it.readText() }).getLong("untilUtcMs") - System.currentTimeMillis()).coerceIn(0, 86_400_000)
+    private val resultsFile = AtomicFile(File(app.noBackupFilesDir, "social-access-results.json"))
+    private fun readCooldowns(): JSONObject = runCatching { JSONObject(cooldown.openRead().bufferedReader().use { it.readText() }) }.getOrDefault(JSONObject())
+    override fun cooldownRemainingMillis(key: String): Long = runCatching {
+        val j = readCooldowns()
+        val until = j.optJSONObject("targets")?.optLong(key) ?: j.optLong("untilUtcMs")
+        (until - System.currentTimeMillis()).coerceIn(0, 86_400_000)
     }.getOrDefault(0)
-    override fun persistCooldown(delayMillis: Long) = atomicWrite(cooldown, JSONObject().put("untilUtcMs", System.currentTimeMillis() + delayMillis))
+    override fun persistCooldown(key: String, delayMillis: Long) {
+        val j = readCooldowns()
+        val targets = j.optJSONObject("targets") ?: JSONObject()
+        targets.put(key, System.currentTimeMillis() + delayMillis)
+        atomicWrite(cooldown, JSONObject().put("schemaVersion", 2).put("targets", targets))
+    }
     fun clearHistory() { history.delete() }
-    fun diagnosticPreview(): String = runCatching { history.openRead().bufferedReader().use { it.readText() } }.getOrElse { "{\"schemaVersion\":2,\"entries\":[]}" }
+
+    /**
+     * Önizlenebilir, temizlenebilir tanılama çıktısı: uygulama/katalog/değerlendirici
+     * sürümleri, Android sürümü, hedef sonuçları (özel alan adları "custom" olarak
+     * maskelenir) ve deneme özetleri. URL, çerez, hesap kimliği, HTML yoktur.
+     */
+    fun diagnosticPreview(): String {
+        val entries = runCatching { JSONObject(history.openRead().bufferedReader().use { it.readText() }).optJSONArray("entries") }.getOrNull() ?: JSONArray()
+        val results = TargetResultCodec.decode(runCatching { resultsFile.openRead().bufferedReader().use { it.readText() } }.getOrNull())
+        val masked = JSONArray(results.first.values.map { r -> JSONObject().put("target", if (r.platformId == SocialPlatform.CUSTOM.id) "custom" else r.platformId)
+            .put("network", r.network.status.name).put("networkSource", r.network.source.name).put("content", r.content.status.name)
+            .put("contentSource", r.content.source.name).put("strategyId", r.strategyId ?: "").put("failureClass", r.failureClass) })
+        return JSONObject().put("schemaVersion", 3)
+            .put("appVersion", net.atom.dpibypass.BuildConfig.VERSION_NAME)
+            .put("catalogVersion", SocialPlatform.CATALOG_VERSION).put("evaluatorVersion", GoalEvaluator.VERSION)
+            .put("androidSdk", Build.VERSION.SDK_INT).put("networkTransport", SocialAccessRuntime.transportLabel())
+            .put("planStrategyId", results.second ?: "").put("results", masked).put("entries", entries).toString(2)
+    }
     // Yalnızca yanlış-pozitif düzeltmesinde gerekir; açılışta ana iş parçacığında
     // dosya oluşturup fsync etmesin diye tembel.
     private val localKey by lazy {
@@ -90,6 +128,7 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
     }
     var target: Target? = null
     override fun available() = engine != null
+    override fun networkUsable(): Boolean = SocialAccessRuntime.networkUsable()
     override suspend fun apply(candidate: CandidateDefinition, operationId: String) {
         if (candidate.strategyId != null) {
             checkNotNull(engine) { "VPN permission/connection required" }.applyAlpha(candidate.strategyId, operationId)
@@ -110,21 +149,60 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
         }
         return engine?.rollbackAlpha(operationId) ?: true
     }
+    override suspend fun commit(operationId: String): Boolean = engine?.commitAlpha(operationId) ?: false
+    override suspend fun revertPlan(operationId: String): Boolean = engine?.revertCommittedAlpha(operationId) ?: true
+
+    /**
+     * Oturum boyunca sabitlenen DNS cevapları: doğrudan kontrol ve aday ölçümü AYNI
+     * doğrulanmış adrese gider; böylece fark DNS'ten değil taşıma yolundan gelir.
+     * Motor açıksa cevap motorun şifreli DNS'inden, değilse sistem DNS'inden alınır.
+     */
+    private val pins = ConcurrentHashMap<String, List<InetAddress>>()
+    override fun beginSession() { pins.clear() }
+    private fun pinned(host: String): List<InetAddress> = pins.getOrPut(host) {
+        val resolved = engine?.resolveAlphaHost(host)?.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+            ?.takeIf { it.isNotEmpty() } ?: InetAddress.getAllByName(host).toList()
+        resolved.filter(PublicTargetAddress::allowed).ifEmpty { throw UnknownHostException("PUBLIC_TARGET_REQUIRED") }
+    }
+
+    override suspend fun dnsDiagnosis(target: Target): String = withContext(Dispatchers.IO) {
+        val host = runCatching { URI(target.probeUrl).host }.getOrNull() ?: return@withContext "UNKNOWN"
+        val encrypted = engine?.let { runCatching { it.resolveAlphaHost(host) }.getOrNull() }?.takeIf { it.isNotEmpty() }
+            ?: return@withContext "UNKNOWN"
+        // Uygulamanın kendi süreci tünel dışında: buradaki sistem DNS'i alttaki
+        // ağın (operatör/özel DNS) cevabıdır.
+        val system = runCatching { InetAddress.getAllByName(host).toList() }.getOrNull()
+        when {
+            system.isNullOrEmpty() -> "SYSTEM_DNS_FAILED"
+            system.none(PublicTargetAddress::allowed) && encrypted.isNotEmpty() -> "SYSTEM_DNS_NON_PUBLIC"
+            else -> "CONSISTENT"
+        }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     override suspend fun probe(target: Target, throughCandidate: Boolean): NetworkEvidence = withContext(Dispatchers.IO) {
+        val route = if (throughCandidate) "THROUGH_CANDIDATE" else "DIRECT_CONTROL"
         val client = OkHttpClient.Builder().connectTimeout(6, TimeUnit.SECONDS).readTimeout(6, TimeUnit.SECONDS)
             .callTimeout(18, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false)
             .proxy(Proxy.NO_PROXY)
             .dns(object : okhttp3.Dns {
-                override fun lookup(hostname: String): List<InetAddress> {
-                    val resolved = engine?.resolveAlphaHost(hostname)?.map { InetAddress.getByName(it) } ?: InetAddress.getAllByName(hostname).toList()
-                    return resolved.filter(PublicTargetAddress::allowed).ifEmpty { throw UnknownHostException("PUBLIC_TARGET_REQUIRED") }
-                }
+                override fun lookup(hostname: String): List<InetAddress> = pinned(hostname)
             })
             .socketFactory(if (throughCandidate) PublicSocksSocketFactory() else SocketFactory.getDefault())
             .retryOnConnectionFailure(false).build()
-        val call = client.newCall(Request.Builder().url(target.url).head().build())
         try {
+            var evidence = execute(client, Request.Builder().url(target.probeUrl).head().build(), route)
+            // HEAD desteklenmiyorsa boyutu sınırlı tek GET (gövde okunmaz, ilk bayt istenir).
+            if (evidence.httpStatus == 405 || evidence.httpStatus == 501)
+                evidence = execute(client, Request.Builder().url(target.probeUrl).get().header("Range", "bytes=0-0").build(), route)
+                    .let { it.copy(requests = 2, bytes = it.bytes + evidence.bytes) }
+            evidence
+        } finally { client.dispatcher.executorService.shutdown(); client.connectionPool.evictAll() }
+    }
+
+    private suspend fun execute(client: OkHttpClient, request: Request, route: String): NetworkEvidence {
+        val call = client.newCall(request)
+        return try {
             val received = suspendCancellableCoroutine<Response> { continuation ->
                 continuation.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : Callback {
@@ -134,27 +212,29 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
             }
             received.use { response ->
                 val bytes = response.headers.toString().toByteArray(Charsets.UTF_8).size.toLong()
-                // Yönlendirme takip edilmez; 3xx de TLS el sıkışmasının geçtiğini ve
-                // sunucunun yanıt verdiğini gösterir (kısa bağlantılar hep 3xx döner).
-                NetworkEvidence(if (response.code in 200..399) "PASS" else "UNKNOWN", bytes,
-                    reason = (if (throughCandidate) "THROUGH_CANDIDATE" else "DIRECT_CONTROL") + ":HTTP_${response.code}:NETWORK_PATH_ONLY",
-                    retryAfterSeconds = if (response.code == 429 || response.code == 503) response.header("Retry-After")?.toLongOrNull()?.coerceIn(1, 86400) ?: 60 else 0)
+                // Yönlendirme takip edilmez. Doğrulanmış TLS üzerinden gelen her HTTP
+                // yanıtı yalnızca ağ yolunun açık olduğunu gösterir; içerik başarısı değildir.
+                ProbeClassifier.fromHttp(route, response.code, response.header("Retry-After"), System.currentTimeMillis(), bytes)
             }
         } catch (e: CancellationException) { call.cancel(); throw e }
-        catch (_: Exception) { NetworkEvidence("UNKNOWN", bytes = 262_144, reason = if (throughCandidate) "THROUGH_CANDIDATE:TRANSPORT_UNKNOWN" else "DIRECT_CONTROL:TRANSPORT_UNKNOWN") }
-        finally { client.dispatcher.executorService.shutdown(); client.connectionPool.evictAll() }
+        catch (e: Exception) { ProbeClassifier.fromException(route, e).copy(bytes = 262_144) }
     }
     override fun journal(operationId: String, stage: String, candidate: CandidateDefinition?) = journal.stage(operationId, stage, candidate)
     override fun clearRecovery() = journal.clearAfterProcessRecovery()
+    override fun persistResults(results: Collection<TargetResult>, planStrategyId: String?) =
+        atomicWrite(resultsFile, TargetResultCodec.encode(results, planStrategyId))
+    override fun loadResults(): Pair<Map<String, TargetResult>, String?> =
+        TargetResultCodec.decode(runCatching { resultsFile.openRead().bufferedReader().use { it.readText() } }.getOrNull())
     override fun persist(state: TrialState) {
         val j = JSONObject().put("schemaVersion", 2).put("phase", state.phase.name).put("testMode", state.mode.name)
             .put("sessionId", state.sessionId).put("attemptId", state.attemptId).put("targetRef", state.target?.targetRef ?: "").put("candidateId", state.candidate?.id ?: "")
             .put("contextGeneration", state.contextGeneration).put("modeGeneration", state.modeGeneration)
             .put("requests", state.requests).put("diagnosticBytes", state.diagnosticBytes).put("rendererLoads", state.rendererLoads)
             .put("userOutcome", state.userOutcome).put("autoVerdict", state.autoVerdict.name).put("finishReason", state.finishReason ?: "")
-            .put("technicalOutcome", state.technicalOutcome).put("platformId", state.goal?.platformId ?: "")
+            .put("technicalOutcome", state.technicalOutcome).put("baselineOutcome", state.baselineOutcome).put("platformId", state.goal?.platformId ?: "")
+            .put("targetCount", state.targets.size).put("planStrategyId", state.plan.strategyId ?: "")
             .put("identityContext", state.goal?.identityContext ?: "UNKNOWN").put("actualSurface", if (state.autoVerdict == Verdict.PASS) "CONTROLLED_WEB_VIEW" else "UNKNOWN")
-            .put("evaluatorVersion", GoalEvaluator.VERSION).put("causalAttribution", state.causalAttribution)
+            .put("evaluatorVersion", GoalEvaluator.VERSION).put("catalogVersion", SocialPlatform.CATALOG_VERSION).put("causalAttribution", state.causalAttribution)
         atomicWrite(summary, j)
         if (state.phase in setOf(Phase.FINISHED, Phase.ROLLING_BACK) && state.sessionId.isNotBlank()) {
             val timestamp = System.currentTimeMillis()
@@ -215,6 +295,7 @@ object SocialAccessRuntime {
     private var cm: ConnectivityManager? = null
     private val tracker = NetworkContextTracker()
     private var pendingContextChange: Job? = null
+    @Volatile private var transport = "UNKNOWN"
 
     @Synchronized fun initialize(context: Context) {
         if (initialized) return
@@ -235,6 +316,10 @@ object SocialAccessRuntime {
         cm = app.getSystemService(ConnectivityManager::class.java)
     }
     fun launch(action: suspend ExperimentCoordinator.() -> Unit) { scope.launch { coordinator.action() } }
+    fun networkUsable(): Boolean = tracker.usable()
+    /** Anonim taşıyıcı türü (SSID/operatör adı yok); tanılama için. */
+    fun transportLabel(): String = transport
+
     @Synchronized fun observeNetworks(enabled: Boolean) {
         val manager = cm ?: return
         if (!enabled) {
@@ -242,30 +327,50 @@ object SocialAccessRuntime {
             networkCallback = null; tracker.clear(); pendingContextChange?.cancel(); return
         }
         if (networkCallback != null) return
+        val request = NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build()
+        // Android 12+: sistemin bu isteğe göre SEÇTİĞİ alttaki ağ izlenir (uygulamanın
+        // kendi süreci tünel dışında olduğu için ölçümler de bu ağdan çıkar).
+        // Eski sürümlerde tüm ağlar izlenir ve sıralama yaklaşık bir yedektir.
+        val best = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
         networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (best && tracker.selected(network.networkHandle)) contextChangedSoon()
+            }
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                tracker.capabilities(network.networkHandle, caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                    !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL))
                 val kind = when {
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> NetworkContextTracker.Kind.ETHERNET
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> NetworkContextTracker.Kind.WIFI
                     caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> NetworkContextTracker.Kind.CELLULAR
                     else -> NetworkContextTracker.Kind.OTHER
                 }
+                transport = kind.name
+                if (best) return
                 if (tracker.update(network.networkHandle, kind)) contextChangedSoon()
             }
             override fun onLost(network: Network) {
-                if (tracker.update(network.networkHandle, null)) contextChangedSoon()
+                if (best) tracker.selected(null)
+                else if (tracker.update(network.networkHandle, null)) contextChangedSoon()
             }
         }
-        manager.registerNetworkCallback(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), networkCallback!!)
+        if (best) manager.registerBestMatchingNetworkCallback(request, networkCallback!!, Handler(Looper.getMainLooper()))
+        else manager.registerNetworkCallback(request, networkCallback!!)
     }
     /** Geçişler birkaç geri çağrıyla gelir; ağ oturana kadar beklenir, tek değişim sayılır. */
     private fun contextChangedSoon() = synchronized(this) {
         pendingContextChange?.cancel()
         pendingContextChange = scope.launch { delay(2_000); coordinator.contextChanged() }
     }
-    suspend fun vpnStopped() { if (initialized) withContext(Dispatchers.IO) { coordinator.stop(); adapter.engine = null } }
+    suspend fun vpnStopped() { if (initialized) withContext(Dispatchers.IO) { coordinator.engineStopped(); adapter.engine = null } }
+    suspend fun engineStarted(strategyId: String?) { if (initialized) withContext(Dispatchers.IO) { coordinator.engineStarted(strategyId) } }
     suspend fun settingsChanging() { if (initialized) withContext(Dispatchers.IO) { coordinator.contextChanged() } }
+
+    /** Seçili platformların strateji doğrulamasında denenecek alan adları. */
+    fun probeHosts(platforms: Set<String>): List<String> =
+        platforms.mapNotNull { SocialPlatform.byId(it) }.flatMap { it.probeHosts }.distinct()
+
     fun catalog(goal: Goal, family: net.atom.dpibypass.isp.IspFamily = net.atom.dpibypass.isp.Isp.Other.family): List<CandidateDefinition> = buildList {
         if ("OFFICIAL_WEB" in goal.allowedSurfaces) add(CandidateDefinition(id = "A1-official-web", family = "A1", displayName = "Resmî web yolu", surface = "OFFICIAL_WEB"))
         if (goal.identityContext == "ANONYMOUS" && goal.publicFallbackAllowed && "CONTROLLED_WEB_VIEW" in goal.allowedSurfaces) {

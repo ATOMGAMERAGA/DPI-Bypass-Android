@@ -34,3 +34,18 @@ test('natural selected-media progress needs three seconds and rejects advertisem
 test('seek event permanently invalidates this observation window',()=>{
   const f=fixture();f.observe();f.listeners.get('seeking')();for(let i=0;i<5;i++)assert.equal(f.observe().mediaProgress,'UNKNOWN');
 });
+test('200 empty shell without recognised player is never content success',()=>{
+  // Sunucu 200 döndü ama oynatıcı/makale yok (boş kabuk, çerez ekranı, bilinmeyen layout).
+  const href='https://www.youtube.com/watch?v=abcdefghijk';
+  const context=vm.createContext({URL,location:{href},window:{},navigator:{},performance:{now:()=>0,getEntriesByType:()=>[{transferSize:900,type:'navigate'}]},
+    document:{visibilityState:'visible',querySelector:s=>s==='link[rel="canonical"]'?{href}:null}});
+  const o=JSON.parse(vm.runInContext(script,context));
+  assert.equal(o.contentPresent,'UNKNOWN');assert.equal(o.blockingGate,'UNKNOWN');assert.equal(o.knownLayout,false);
+});
+test('redirect to a login/consent host does not match the selected content',()=>{
+  const href='https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dabcdefghijk';
+  const context=vm.createContext({URL,location:{href},window:{},navigator:{},performance:{now:()=>0,getEntriesByType:()=>[{transferSize:900,type:'navigate'}]},
+    document:{visibilityState:'visible',querySelector:()=>null}});
+  const o=JSON.parse(vm.runInContext(script,context));
+  assert.equal(o.contentId,'');assert.equal(o.contentPresent,'UNKNOWN');assert.equal(o.canonicalMatch,false);
+});

@@ -5,6 +5,8 @@ import android.content.pm.ApplicationInfo
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +24,7 @@ import net.atom.dpibypass.data.SettingsRepository
 import net.atom.dpibypass.data.ThemePref
 import net.atom.dpibypass.dns.DohProvider
 import net.atom.dpibypass.dns.DohResolver
+import net.atom.dpibypass.engine.EngineOwnership
 import net.atom.dpibypass.isp.Isp
 import net.atom.dpibypass.isp.IspDetector
 import net.atom.dpibypass.isp.Transport
@@ -55,8 +58,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = SettingsRepository(app)
 
+    /**
+     * Başlangıç değeri `Settings(loaded = false)`: DataStore okunana kadar arayüz
+     * bunu kullanıcının gerçek tercihi gibi UYGULAMAMALI (bkz. [Settings.loaded]).
+     */
     val settings: StateFlow<Settings> =
         repo.settings.stateIn(viewModelScope, SharingStarted.Eagerly, Settings())
+
+    /** Son kaydetme hatası; arayüz "Kaydedildi" yerine bunu gösterir. */
+    private val _saveError = MutableStateFlow<String?>(null)
+    val saveError: StateFlow<String?> = _saveError.asStateFlow()
+    fun clearSaveError() { _saveError.value = null }
+
+    /** Bağlantı kurulamadıysa kullanıcıya gösterilecek neden. */
+    val connectionFailure: StateFlow<String?> = VpnState.failureReason
 
     val connectionState: StateFlow<ConnectionState> = VpnState.state
     val profile = VpnState.profile
@@ -96,7 +111,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // (kapalı) yayınlar; eskiden ekran bu ilk değeri görüp süren bir denemeyi
         // durdurabiliyordu.
         viewModelScope.launch {
-            repo.settings.map { it.socialAccessEnabled }.distinctUntilChanged().collect { enabled ->
+            // Okuma hatasında varsayılan "kapalı" değeri gerçek tercih sayılmaz.
+            repo.settings.filter { !it.readError }.map { it.socialAccessEnabled }.distinctUntilChanged().collect { enabled ->
                 net.atom.dpibypass.social.SocialAccessRuntime.coordinator.enabled(enabled)
                 net.atom.dpibypass.social.SocialAccessRuntime.observeNetworks(enabled)
             }
@@ -127,10 +143,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setDohProvider(p: DohProvider) = launch { repo.setDohProvider(p) }
     fun setCustomDohUrl(v: String) = launch { repo.setCustomDohUrl(v) }
     fun setAppFilterMode(m: AppFilterMode) = launch { repo.setAppFilterMode(m) }
+    /** DataStore içinde atomik: hızlı art arda dokunuşlarda seçim kaybolmaz. */
     fun toggleApp(pkg: String, selected: Boolean) = launch {
-        val current = settings.value.selectedApps.toMutableSet()
-        if (selected) current.add(pkg) else current.remove(pkg)
-        repo.setSelectedApps(current)
+        repo.updateSelectedApps { if (selected) it + pkg else it - pkg }
     }
     fun clearSelectedApps() = launch { repo.setSelectedApps(emptySet()) }
     fun setAutoConnectOnBoot(v: Boolean) = launch { repo.setAutoConnectOnBoot(v) }
@@ -143,6 +158,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun setOnboardingDone(v: Boolean) = launch { repo.setOnboardingDone(v) }
     fun setSamsungVpnIndicator(v: Boolean) = launch { repo.setSamsungVpnIndicator(v) }
     fun setSocialAccessEnabled(v: Boolean) = launch { repo.setSocialAccessEnabled(v) }
+    fun setSocialPlatform(id: String, selected: Boolean) = launch {
+        repo.updateSocialPlatforms { if (selected) it + id else it - id }
+    }
+    fun setSocialTargetUrl(v: String) = launch { repo.setSocialTargetUrl(v) }
+    /** Kapsam dışındaki platform için tek adımlı düzeltme (kullanıcının açık komutu). */
+    fun bringIntoScope(packages: Set<String>) = launch { repo.bringIntoScope(packages) }
+    fun restoreScopeBackup() = launch { repo.restoreScopeBackup() }
     fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = launch {
         repo.setSocialAccessMode(v)
         if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()
@@ -153,18 +175,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun socialIspFamily() = (network.value.isp ?: settings.value.selectedIsp).family
 
     /**
-     * Sosyal Erişim'de işe yaradığı bildirilen yerel DPI profilini kalıcılaştırır:
-     * strateji testinin kazananı gibi hem manuel seçime hem bu ağın profiline
-     * yazılır. Strateji tüneli yeniden kurdurmaz; çalışan deneme yerinde kalır,
-     * sonraki bağlantılar da bu profille açılır.
+     * Sosyal Erişim'de onaylanan yerel DPI profilini kullanıcının MANUEL strateji
+     * seçimi de yapar (açık komut). Otomatik kipte ağ profili, plan onaylandığında
+     * servis tarafından zaten yazılır. Strateji tüneli yeniden kurdurmaz.
+     * [onDone] yalnız kayıt GERÇEKTEN başarılı olunca true alır.
      */
-    fun keepSocialStrategy(strategyId: String) = launch {
-        if (StrategyPool.byId(strategyId) == null) return@launch
-        repo.setSelectedStrategy(strategyId)
-        val detector = IspDetector(getApplication<Application>())
-        val transport = detector.activeTransport()
-        val isp = network.value.isp ?: runCatching { detector.bestGuess() }.getOrNull() ?: settings.value.selectedIsp
-        repo.saveNetworkProfile(IspDetector.networkKey(transport, isp), strategyId)
+    fun keepSocialStrategy(strategyId: String, onDone: (Boolean) -> Unit = {}) {
+        viewModelScope.launch {
+            val ok = StrategyPool.byId(strategyId) != null && runCatching {
+                repo.setSelectedStrategy(strategyId)
+                val detector = IspDetector(getApplication<Application>())
+                val transport = detector.activeTransport()
+                val isp = network.value.isp ?: runCatching { detector.bestGuess() }.getOrNull() ?: settings.value.selectedIsp
+                repo.saveNetworkProfile(IspDetector.networkKey(transport, isp), strategyId)
+            }.isSuccess
+            if (!ok) _saveError.value = "Profil kaydedilemedi; ayarlar değişmedi."
+            onDone(ok)
+        }
     }
 
     /**
@@ -173,9 +200,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * otomatik bulur. Kurulum sihirbazından çağrılır.
      */
     fun enableDiscordOnlyMode() = launch {
-        repo.setOperationMode(OperationMode.Auto)
-        repo.setAppFilterMode(AppFilterMode.Include)
-        repo.setSelectedApps(setOf(DISCORD_PACKAGE))
+        // Tek atomik yazım; önceki kapsam yedeklenir ve geri yüklenebilir.
+        repo.enableOnlyApps(setOf(DISCORD_PACKAGE))
     }
 
     /**
@@ -197,13 +223,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * stratejiyi doğrular. Testin bulduğu kazanan ile bağlanmanın seçtiği
      * strateji artık ayrışmaz.
      */
+    private var testJob: Job? = null
+
     fun runStrategyTest() {
         if (_testing.value || !canRunTest.value) return
-        val alpha = net.atom.dpibypass.social.SocialAccessRuntime.coordinator.state.value
-        if (alpha.resourceDisposition != "NONE") return
+        // Motor tekil: VPN (ya da başka bir test) sahipken test başlamaz. Kullanıcı
+        // test sürerken bağlanırsa servis testi iptal ettirir (bkz. EngineOwnership).
+        val token = EngineOwnership.tryAcquire(EngineOwnership.Owner.STRATEGY_TEST) { testJob?.cancel() } ?: return
         _testing.value = true
         _testWinner.value = null
-        launch {
+        testJob = viewModelScope.launch {
             try {
                 val s = settings.value
                 val doh = DohResolver(s.effectiveDohUrl())
@@ -214,11 +243,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val transport = detector.activeTransport()
                 val isp = detector.bestGuess() ?: s.selectedIsp
                 val ordered = StrategyPool.orderedFor(isp.family)
-                val hosts = StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(s)
+                val social = if (s.socialAccessEnabled) net.atom.dpibypass.social.SocialAccessRuntime.probeHosts(s.socialPlatforms) else emptyList()
+                val hosts = (StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(s) + social).distinct()
 
-                // Tester sonuçlarını UI'a canlı yansıt. (viewModelScope.launch -> Job;
-                // aşağıdaki mirror.cancel() için gerekli.)
-                val mirror = viewModelScope.launch {
+                // Tester sonuçlarını UI'a canlı yansıt. Test işinin çocuğudur:
+                // test iptal edilirse ayna da durur.
+                val mirror = this.launch {
                     tester.results.collect { _testResults.value = it }
                 }
                 // Tanı ekranı: süre bütçesi yok — kullanıcıya tüm preset sonuçları
@@ -237,8 +267,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     _testWinner.value = _testResults.value.firstOrNull { it.strategy.id == best.first.id }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _saveError.value = "Strateji testi tamamlanamadı."
             } finally {
                 _testing.value = false
+                EngineOwnership.release(token)
             }
         }
     }
@@ -271,8 +306,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun extraHosts(s: Settings): List<String> =
         s.extraBlockedHosts.split(',', '\n', ' ').map { it.trim() }.filter { it.isNotBlank() }
 
+    /** Ayar yazımı başarısız olursa uygulama çökmez ve sessiz de kalmaz. */
     private fun launch(block: suspend () -> Unit) {
-        viewModelScope.launch { block() }
+        viewModelScope.launch {
+            try { block() }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { _saveError.value = "Ayar kaydedilemedi; önceki değer geçerli." }
+        }
     }
 
     companion object {

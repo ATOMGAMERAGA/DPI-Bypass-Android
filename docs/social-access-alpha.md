@@ -1,5 +1,123 @@
 # Sosyal Erişim Deneyleri — Alpha (Android)
 
+> **Güncel davranış: 23 Ekim 2026 revizyonu aşağıdadır.** Daha eski bölümler tarihsel kayıttır; çeliştikleri yerde bu revizyon geçerlidir (özellikle: N4 profilleri artık otomatik kipte ağ yolu üzerinden değerlendirilir; onaylanan profil ayar/ağ değişikliğinde ve başka hedefin denemesinde geri alınmaz).
+
+## Revizyon — 23 Ekim 2026 (temel: `5d92f5e`)
+
+### Kök neden tablosu
+
+Kanıt türü: **T** = birim testiyle yeniden üretildi (yeni test `5d92f5e` üzerinde kırmızı, bu sürümde yeşil), **S** = statik kod incelemesi (Android/native yolu cihazda doğrulanmadı), **C** = gerçek cihaz (bu revizyonda **yok**).
+
+| Belirti | Yeniden üretim | Dosya / sembol | Kanıt | Düzeltme | Doğrulama |
+|---|---|---|---|---|---|
+| Ayar değişince çalışan yöntem kapanıyor | KEEP → `contextChanged()` | `DpiVpnService.reconfigureTunnel` → `SocialAccessRuntime.settingsChanging` → `ExperimentCoordinator.contextChanged` → `stop()` → `rollback()` | T: `SocialRegressionTest.keptNativeMethodSurvivesTunnelSettingsChange` eski kodda `expected 0 but was 1` (geri alma) | Onaylanan aday servis tabanına alınır (`commitAlpha`, `currentBaseArgs`); bağlam değişimi yalnız geçici denemeyi geri alır, planı korur, sonuçları bayatlatıp bir kez yeniden doğrular | T + `MultiTargetTest.settingsChangeKeepsPlanAndReverifiesOnceWithoutLoop` |
+| Bir uygulamayı düzeltirken diğeri bozuluyor (1) | A'da KEEP → B için `start()` | `ExperimentCoordinator.start` → `stop()` | T: `testingSecondPlatformDoesNotRevertFirstPlatformsKeptMethod` eski kodda geri alma sayısı 0→1 | `start()` yalnız geçici denemeyi durdurur (`stopTrial`); plan korunur | T |
+| Bir uygulamayı düzeltirken diğeri bozuluyor (2) | B için aday A'yı bozuyor | Tek global motor (`applyAlpha`), tek hedefli `TrialState` | S (eski kodda ölçüm yoktu) | Her DPI adayı seçili BÜTÜN hedeflerde adayın yolundan ölçülür; önceden çalışan hedefte gerileme varsa aday reddedilir ve geri alınır | T: `candidateThatBreaksAWorkingAppIsRejectedAndCommonPlanIsKept` |
+| Bir uygulamayı düzeltirken diğeri bozuluyor (3) | KEEP sonrası ikinci deneme | `AlphaJournal.stage`: KEPT kaydı silinmiyordu; sonraki `APPLY_INTENT_DURABLE` "Unresolved operation" atardı | S (eski kod bunu her seferinde KEEP'i geri alarak gizliyordu; Android `AtomicFile` birim testinde yok) | KEPT tamamlanmış işlemdir; kayıt silinir | Dolaylı T (çoklu hedef testleri), cihazda doğrulanmadı |
+| Otomatik test çalışan yöntemi seçemiyor | Otomatik + N4 adayları | `launchNext()`: `!observerAvailable || !meterAllowed || candidate.strategyId != null` → her N4 adayı ertelenip geri alınıyordu | T: `automaticModeEvaluatesNativeCandidateOnItsRealPath` eski kodda `AUTO_UNAVAILABLE` | N4 adayları adayın gerçek yolundan (yerel SOCKS) ağ düzeyinde değerlendirilir: başlangıç (motorun o anki planı + doğrudan kontrol) → aday → kazanç/gerileme → ikinci ölçümle kararlılık → plan. İçerik için onay ayrı istenir | T |
+| WebView sonucu adayın etkisi sanılabilir | — | `ControlledWebProbe` uygulamanın kendi WebView'i; uygulama paketi `applySplitTunneling`'de tünel dışında | S | WebView yalnız A5 (test penceresi yüzeyi) için kullanılır; N4 adayına gelen gözlem `observe()` içinde reddedilir; arayüz "doğrudan yol; DPI profilinin etkisini ölçmez" der | T: `webViewObservationCannotCreditANativeCandidate` (savunma katmanı) |
+| Zorunlu hedef DNS'te çözülemiyorken tam başarı | — | `StrategyTester.resolve/verify` paydayı çözülen alt kümeye indiriyordu | S | `totalTargets` zorunlu hedeflerin tamamı; `unresolvedTargets` raporlanır; `fullCoverage` asla true olmaz; kazanan: kapsama → en yavaş hedefin el sıkışması | T: `coverageBeatsSingleFastHost…` |
+| Hızlı art arda uygulama seçimi kayboluyor | İki dokunuş, eski anlık görüntü | `AppViewModel.toggleApp` (StateFlow'dan oku-değiştir-yaz) | T: `snapshotReadModifyWriteWasTheLostUpdateMechanism` mekanizmayı gösterir | `SettingsRepository.updateSelectedApps` DataStore `edit` içinde atomik | T: 40 eşzamanlı ekle + 20 çıkar, kayıp yok |
+| "Yalnızca seçili" boşken tüm trafik tünelde | Liste boş / paketler kaldırılmış | `applySplitTunneling`: hiç `addAllowedApplication` yoksa Android hepsini alır | S (Android davranışı) | `AppScope.decide` → `EmptyInclude`: tünel kurulmaz, ana ekranda neden yazılır | T: `emptyOrRemovedIncludeListNeverBecomesAllTraffic` |
+| Strateji testi ile bağlanma aynı anda native motoru kullanabiliyor | Test sürerken Bağlan | ByeDPI global durumu; `canRunTest` yalnız başlangıçta kontrol | S | `EngineOwnership`: VPN testi iptal ettirir ve bırakmasını bekler; VPN sahipken test başlamaz | T: `connectPreemptsRunningStrategyTestAndWaitsForRelease` |
+| Kurtarma gerekirken DNS/QUIC/kapsam ayarı uygulanmıyor | RECOVERY_REQUIRED + ayar değişimi | `reconfigureTunnel` erken `return` | S | Ayar her durumda uygulanır; kurtarma ayrı yürür | S |
+| Açılışta varsayılan değer gerçek tercih gibi uygulanıyor | Soğuk açılış | `stateIn(…, Settings())`; `MainActivity` sihirbazı `onboardingDone=false` varsayılanıyla açıyordu | S (Sosyal Erişim için önlem zaten vardı; sihirbaz için yoktu) | `Settings.loaded`; sihirbaz ve Sosyal Erişim ekranı yalnız okunmuş değerle çizilir; okuma hatası `readError` olarak gösterilir | T: `defaultStateFlowValueIsMarkedNotLoaded`, `corruptSettingsFileIsReportedNotSilentlyDefaulted` |
+| "Sadece Discord" kullanıcının listesini siliyor | Kısayol | `enableDiscordOnlyMode` üç ayrı yazım, yedek yok | S | Tek atomik yazım + kapsam yedeği + geri yükleme | T: `discordOnlyIsAtomicAndRestorable` |
+| "Kaydedildi" kaydetmeden önce gösteriliyor | — | `SocialAccessScreen` `onKeep` | S | Mesaj yalnız kayıt başarılıysa; hata `saveError` ile gösterilir | S |
+
+Ön incelemedeki 7. madde (açılışta `Settings()` varsayılanının denemeyi durdurması) bu sürümden önce `AppViewModel`'de zaten düzeltilmişti; yeniden uygulanmadı. Kalan açık sihirbaz kapısıydı (yukarıda).
+
+### Kavramlar
+
+| Kavram | Nerede | Ömür |
+|---|---|---|
+| Kullanıcının istediği ayar | DataStore (`SettingsRepository`): açık/kapalı, Manuel/Otomatik, seçili platformlar, bağlantı | Kalıcı |
+| Kalıcı profil | Otomatik kipte ağ profili (`saveNetworkProfile`); manuel kipte yalnız kullanıcı "Manuel stratejim de bu olsun" derse | Kalıcı |
+| Denenen geçici ayar | `TrialState.resourceDisposition = TRIAL_ACTIVE`, servis `alphaOperation` | Tek deneme; her bağlam değişiminde geri alınır |
+| Motora uygulanmış ayar | Servis `currentBaseArgs` (+ Vodafone ekleri) = `PlanState.installed` | Bağlantı süresince |
+| Güncel doğrulama sonucu | `TrialState.results` (hedef başına; `stale`), `noBackupFilesDir/social-access-results.json` | Kalıcı ama yeniden açılışta **bayat**; ölçülmeden güncel gösterilmez |
+
+### Çoklu uygulama trafik planı
+
+Native motor tekildir ve kapsamdaki bütün uygulamalara aynı ayarla uygulanır; hedef (SNI/alan adı) bazlı ayrı kural bu sürümde **eklenmedi**: sabitlenen ByeDPI sürümü (`078842b`) ve mevcut mimaride hedefe göre güvenilir ayrım (paylaşılan CDN, ECH, aynı süreçte birden çok servis) doğrulanmadı. Bunun yerine:
+
+1. Seçili hedeflerin hepsi başlangıçta motorun o anki planıyla ölçülür (odak hedef ayrıca doğrudan kontrol yolundan).
+2. Her DPI adayı uygulanır ve **bütün** hedefler adayın yolundan ölçülür.
+3. Önceden açık bir hedef kapanırsa aday reddedilir ve geri alınır (çakışma hedefin satırında gösterilir).
+4. Bütün kapalı hedefleri açan ilk aday ikinci bir ölçümle doğrulanırsa plan olur. Hiçbiri hepsini açmazsa en çok hedefi açan aday yeniden uygulanır, ikinci kez ölçülür ve **kısmi kapsama** diye açıkça işaretlenerek korunur.
+5. Plan motorun tabanına yazılır; Otomatik bağlanma kipinde bu ağın profiline de kaydedilir. Bağlanırken yapılan strateji doğrulaması seçili platformların alan adlarını da içerir, yani bir sonraki bağlantıda da hepsine bakılır.
+
+Bir yöntemin bütün uygulamalar için başarısız olduğu durum gizlenmez: hedef satırı "Ağ yolu kapalı" ve ölçülen hata sınıfıyla kalır.
+
+### Doğrulanmış destek matrisi
+
+"Oto" = bu sürümde kodla ölçülür; "Onay" = kullanıcı bildirimi gerekir; "—" = desteklenmez. **Hiçbir hücre gerçek operatör/cihaz ölçümüyle doğrulanmadı.**
+
+| Platform | Ağ yolu | İçerik | Medya | Ses | Native uygulama |
+|---|---|---|---|---|---|
+| YouTube | Oto | Oto (yalnız belirli herkese açık video, test penceresi, doğrudan yol) / Onay | Oto (test penceresi) / Onay | — | Onay |
+| Instagram | Oto | Oto (yalnız belirli herkese açık gönderi, test penceresi) / Onay | Onay | — | Onay |
+| X, TikTok, Reddit, Facebook, Twitch | Oto | Onay | Onay | — | Onay |
+| Discord | Oto (discord.com; bağlanırken gateway.discord.gg, cdn.discordapp.com da) | Onay | — | Onay (QUIC/UDP düşürme açıksa "kapalı" gösterilir) | Onay |
+| Telegram, WhatsApp, Signal | Oto (web istemcisi / servis uç noktası) | — | — | Onay | Onay |
+| Snapchat | Oto | — | — | — | Onay |
+| Özel alan adı | Oto | Onay | — | — | — |
+
+Telegram, WhatsApp, Signal, Twitch ve Snapchat engellenmiş varsayılarak eklenmedi; kullanıcı kendi ağında sorun görürse aynı ortak plana dahil edebilsin diye vardır. Paket adları resmî Android paketleridir; paylaşılan CDN'ler platforma ait sayılmaz.
+
+### Ölçüm anlamı
+
+- Doğrudan kontrol ve aday ölçümü aynı alttaki ağdan çıkar (uygulamanın kendi süreci tünel dışında; ByeDPI de bu süreçte çalışır) ve oturum boyunca **sabitlenmiş aynı DNS cevabına** gider; fark DNS'ten değil taşıma yolundan gelir. Sistem DNS'i ile şifreli DNS ayrıca karşılaştırılır ("DNS engeli şüphesi" DPI sonucundan ayrı yazılır).
+- Doğrulanmış TLS üzerinden gelen her HTTP yanıtı (2xx–4xx, 429 hariç) yalnız **ağ yolu açık** demektir. 5xx belirsiz (kesinti olabilir). `HEAD` 405/501 dönerse tek bir `GET Range: bytes=0-0` yapılır; gövde okunmaz.
+- Hata sınıfları: DNS hatası, DNS'in özel adres döndürmesi, TCP reddi/sıfırlama, TLS el sıkışması, sertifika uyuşmazlığı (giriş portalı olabilir), zaman aşımı (tek ölçümle kesin değil), hız sınırı, sunucu hatası, doğrulanmış internet yok.
+- `Retry-After` saniye ve HTTP-date kabul eder; bekleme hedef başınadır ve süre dolana kadar o hedefe başka adayla da istek yapılmaz.
+- Başlangıçta ağ yolu zaten açıksa DPI profillerine otomatik başarı yazılmaz; profiller manuel incelemeye bırakılır ("sorun içerik/hesap düzeyinde olabilir").
+- Otomatik ağ başarısı kullanıcı "Hâlâ açılmıyor" derse yanlış pozitif sayılır: plan geri alınır, aday bu oturumda yeniden başarı sayılmaz, sıradaki adaya geçilir.
+- Bağlam değişince (ağ, DNS, QUIC, kapsam, bağlantı yeniden kurulumu) sonuçlar bayatlar; 3 sn sonra bilinen hedefler (en çok 8) bir kez yeniden ölçülür. Aynı bağlam kuşağında ikinci tur yapılmaz, profil döndürülmez.
+- Android 12+ üzerinde sistemin seçtiği alttaki ağ (`registerBestMatchingNetworkCallback`) izlenir; eski sürümlerde Ethernet > Wi-Fi > hücresel sıralaması yaklaşık yedektir. Doğrulanmamış ağda/giriş portalında deneme başlamaz.
+
+### Bütçeler
+
+Tur başına istek bütçesi `24 + 8 × (hedef − 1)`, en çok 80 (önceki 24, tek hedef içindi; ek hedeflerin her biri aday başına bir başlangıç + iki ölçüm gerektirir). Uygulanan aday en çok 12, toplam ölçüm süresi 120 sn, istek başına 18 sn taşıma / 20 sn koordinatör sınırı, tanı metadata'sı 5 MiB (istek başı 256 KiB rezerv; gerçek değer yalnız yanıt başlıkları — HEAD gövde okumaz, GET yalnız 1 bayt ister). "Seçilileri kontrol et" en çok 12 hedef, hedef başına 1 istek; yeniden doğrulama en çok 8 istek. Pil/veri/CPU etkisi ölçülmedi.
+
+### Bilinen sınırlar
+
+- Hedef bazlı (SNI) kural yok: plan kapsamdaki bütün uygulamalara uygulanır; bu yüzden gerileme kontrolü yapılır.
+- WebView adayın (SOCKS) yolunu kullanmaz; `ProxyController` ile yönlendirme eklenmedi (ek bağımlılık ve cihaz doğrulaması gerektirir).
+- Native uygulama içeriği, hesap/giriş/yaş doğrulaması ve sesli görüşme otomatik ölçülmez.
+- IPv6: tünel (Vodafone modu dışında) yalnız IPv4 rotası alır; çift yığın ağda uygulamaların IPv6 trafiği tünel dışında kalır, DPI işlemi uygulanmaz. Bu sürüm bunu değiştirmez; IPv6-only/NAT64 ağlarda davranış cihazda doğrulanmadı.
+- Süreç ölümünde motor ve geçici deneme yok olur; tamamlanmış plan kimliği ve sonuçlar saklanır ama bayattır. Yarım geçici mutasyon journal'dan güvenle temizlenir; yeniden oynatılmaz.
+- Kullanıcının kapatması, VPN izninin geri çekilmesi veya force-stop "kendini onarma" ile tersine çevrilmez.
+
+### Doğrulama kaydı — 23 Ekim 2026
+
+Linux bulut konteyneri, OpenJDK 21.0.12 (Gradle 8.9), Android SDK 35, build-tools 35.0.0, NDK 26.3.11579264, CMake 3.22.1. Fiziksel cihaz veya emülatör **yoktu**.
+
+- `./gradlew testDebugUnitTest`: **102/102 PASS** (önceki 62 + 40 yeni: `SocialRegressionTest` 4, `MultiTargetTest` 15, `PlanAndScopeTest` 14, `SettingsRepositoryTest` 7).
+- `SocialRegressionTest` `5d92f5e` üzerinde ayrı bir çalışma ağacında çalıştırıldı: **3/4 FAIL** (beklenen; yukarıdaki tabloda), bu sürümde 4/4 PASS.
+- `node --test tests/observer.test.cjs`: **8/8 PASS** (2 yeni: 200 boş kabuk, giriş/onay sayfasına yönlendirme).
+- `./gradlew lintDebug`: tamamlandı; 1 hata (`WrongConstant`, `tile/DpiTileService.kt:100`, bu değişiklikten önce de vardı) + 18 uyarı.
+- `./gradlew assembleDebug`: **PASS**; `app/build/outputs/apk/debug/app-debug.apk`, Android Debug sertifikasıyla imzalı (`apksigner verify` geçti), ByeDPI ve hev-socks5-tunnel üç ABI için derlendi. Resmî sürüm değildir.
+- Testler sahte motor adaptörleriyle orkestrasyonu doğrular; gerçek Android VpnService/native/WebView yolu ve Türkiye'deki gerçek engeller bu testlerin kapsamında değildir.
+
+### Cihaz kabul testi (yapılmadı — kullanıcı tarafından)
+
+Samsung Galaxy S24 Ultra / güncel One UI (sürümü cihazdan okuyun; tahmin edilmedi):
+
+1. Ayarlar → Uygulamalar → DPI Bypass → Pil → **Kısıtlanmamış**. Uyku modundaki uygulamalar listesinde olmadığını kontrol edin.
+2. Bağlanın. Sosyal Erişim'i açın, **YouTube + Discord + Instagram**'ı seçin, Otomatik (Beta). "Seçilileri şimdi kontrol et" → her satırın ayrı durumunu not edin.
+3. "Ortak yöntem ara". Bitince ana ekranda "Sosyal Erişim planı etkin (Px)" görünmeli. Üç uygulamayı tek tek açın; her satırda **Çalışıyor / Kısmen / Çalışmıyor** bildirin. Discord'da sesli kanala girip ses satırını ayrıca kontrol edin.
+4. Ayarlar → DNS'i değiştirin. Plan aynı kalmalı (ana ekran), satırlar "Yeniden doğrulanmalı"ya geçip birkaç saniyede güncellenmeli; döngü olmamalı.
+5. Tema ve titreşimi değiştirin: plan ve bağlantı süresi sayacı değişmemeli.
+6. Uygulamalar → "Yalnızca seçili", Instagram'ı listeden çıkarın: Sosyal Erişim'de Instagram "Kapsam dışı" + **Kapsama ekle** görünmeli.
+7. Wi-Fi ↔ mobil veri geçişi; Wi-Fi açıkken mobil veriyi kapatıp açma. Yalnız gerçek geçişte satırlar bayatlamalı.
+8. Uygulamayı son uygulamalardan kaydırıp kapatın, yeniden açın: açık tercihi ve seçili uygulamalar korunmalı; eski sonuçlar "Yeniden doğrulanmalı" görünmeli.
+9. Bildirimden bağlantıyı kapatın; Ayarlar → VPN'den izni kaldırın: uygulama "bağlı değil" göstermeli ve kendiliğinden yeniden bağlanmamalı.
+10. Tanılama → önizle: URL, hesap, çerez olmamalı; özel alan adı "custom" görünmeli.
+
+Operatör test planı (Vodafone, Turkcell, Türk Telekom, en az iki farklı ev Wi-Fi'ı): her ağda 2–3 ve 7. adımları tekrarlayın; ağ türü/ISS, seçilen plan, hedef başına satır durumu ve tanılama dosyasını kaydedin. **Bu revizyonda hiçbir operatör ağı doğrulanmadı.**
+
+
 Implementation base: 3032d6c; task specification v3, 14 October 2026; implementation review 17 October 2026. Feature is opt-in and old installs default to MANUAL. Existing normal DPI, DoH and app filter settings are preserved.
 
 ## Requirement → integration → verification

@@ -38,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -56,7 +57,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.atom.dpibypass.data.ConnectionState
+import net.atom.dpibypass.social.Capability
+import net.atom.dpibypass.social.Check
+import net.atom.dpibypass.social.CheckMode
+import net.atom.dpibypass.social.CheckStatus
 import net.atom.dpibypass.social.ControlledWebProbe
+import net.atom.dpibypass.social.TargetResult
+import net.atom.dpibypass.social.TargetStatus
+import net.atom.dpibypass.social.TargetStatusRules
 import net.atom.dpibypass.social.Goal
 import net.atom.dpibypass.social.Phase
 import net.atom.dpibypass.social.SocialAccessRuntime
@@ -121,11 +129,12 @@ fun SocialAccessEntry(viewModel: AppViewModel, onOpen: () -> Unit) {
 }
 
 private fun entrySummary(enabled: Boolean, state: TrialState): String = when {
-    !enabled -> "Kapalı. Açılmayan YouTube, Instagram, X, TikTok, Discord, Reddit ve Facebook içerikleri için uygun yöntemleri sırayla dener."
+    !enabled -> "Kapalı. Seçtiğin uygulamalar (YouTube, Instagram, X, TikTok, Discord, Reddit, Facebook, Telegram, WhatsApp, Signal, Twitch, Snapchat ya da özel alan adı) için birlikte çalışan ortak yerel DPI planını arar."
     state.phase == Phase.RECOVERY_REQUIRED -> "Kurtarma gerekli — sayfayı açıp geri almayı yeniden deneyin."
     state.phase in BusyPhases || state.phase == Phase.WAITING_FOR_USER || state.phase == Phase.AUTO_EVALUATING ->
         SocialText.phase(state.phase) + (state.candidate?.let { " · ${it.displayName}" } ?: "")
     state.finishReason != null && state.sessionId.isNotBlank() -> finishLabel(state.finishReason)
+    state.plan.strategyId != null -> "Açık · plan ${state.plan.strategyId}" + if (state.plan.installed) " çalışıyor." else " (bu bağlantıda kurulu değil)."
     else -> "Açık · yeni deneme başlatmaya hazır."
 }
 
@@ -135,12 +144,13 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val state by SocialAccessRuntime.coordinator.state.collectAsStateWithLifecycle()
     val connection by viewModel.connectionState.collectAsStateWithLifecycle()
+    val saveError by viewModel.saveError.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
-    var platformId by rememberSaveable { mutableStateOf(SocialPlatform.YOUTUBE.id) }
     var url by rememberSaveable { mutableStateOf("") }
+    var urlRestored by rememberSaveable { mutableStateOf(false) }
     var problem by rememberSaveable { mutableStateOf("UNKNOWN") }
     var publicGoal by rememberSaveable { mutableStateOf(false) }
     var officialWeb by rememberSaveable { mutableStateOf(false) }
@@ -154,12 +164,35 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
     var problemPicker by remember { mutableStateOf(false) }
     var diagnosticPreview by remember { mutableStateOf<String?>(null) }
 
-    val platform = SocialPlatform.byId(platformId) ?: SocialPlatform.YOUTUBE
-    val target = remember(platformId, url) { if (url.isBlank()) Target.home(platformId) else Target.parse(platformId, url) }
-    // Otomatik gözlem yalnızca gözlemcisi olan platformda ve belirli bir içerikte mümkün.
-    val autoPossible = platform.autoObserver && target != null && target.contentId != Target.HOME_CONTENT
-    val mode = if (autoPossible) settings.socialAccessMode else TestMode.MANUAL
+    // Kaydedilmiş bağlantı yalnız ayarlar GERÇEKTEN okunduktan sonra bir kez geri yüklenir.
+    LaunchedEffect(settings.loaded) {
+        if (settings.loaded && !urlRestored) { if (url.isBlank()) url = settings.socialTargetUrl; urlRestored = true }
+    }
+
+    val selected = SocialPlatform.entries.filter { it.id in settings.socialPlatforms }
+    val detected = remember(url) { if (url.isBlank()) null else Target.detectPlatform(url) }
+    // Odak: bağlantının platformu, yoksa seçimdeki ilk platform.
+    val focus = detected?.takeIf { it in selected } ?: selected.firstOrNull()
+    val targets = remember(selected, url) {
+        selected.mapNotNull { p ->
+            when {
+                p == SocialPlatform.CUSTOM -> Target.parse(p.id, url)
+                p == focus && url.isNotBlank() && detected == p -> Target.parse(p.id, url)
+                else -> Target.home(p.id)
+            }
+        }
+    }
+    val focusTarget = targets.firstOrNull { it.platformId == focus?.id }
+    val urlInvalid = url.isNotBlank() && (focus == SocialPlatform.CUSTOM && focusTarget == null ||
+        focus != SocialPlatform.CUSTOM && detected == null && SocialPlatform.CUSTOM !in selected)
+    // Otomatik içerik gözlemi yalnızca gözlemcisi olan platformda ve belirli bir içerikte mümkün.
+    val autoObserver = focus?.autoObserver == true && focusTarget != null && focusTarget.contentId != Target.HOME_CONTENT
+    val mode = settings.socialAccessMode
     val needsMedia = playMedia || problem == "MEDIA_PATH_FAILURE"
+    val engineConnected = connection == ConnectionState.Connected
+    val installed = remember(selected) {
+        selected.associate { p -> p.id to p.packages.filter { pkg -> runCatching { context.packageManager.getApplicationInfo(pkg, 0) }.isSuccess }.toSet() }
+    }
 
     val saveDiagnostics = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { destination ->
         if (destination != null) scope.launch {
@@ -176,16 +209,38 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
 
     AppScreen(
         title = "Sosyal Erişim",
-        subtitle = "Açılmayan bir içerik için uygun yöntemleri sırayla dener. Alpha — her platformda çalışmayabilir.",
+        subtitle = "Seçtiğin uygulamaların birlikte çalıştığı ortak yerel DPI planını arar ve korur. Alpha — her platformda çalışmayabilir.",
         actions = {
             IconButton(onClick = onBack) { Icon(Icons.Rounded.Close, contentDescription = "Kapat") }
         },
     ) {
+        // Ayarlar henüz okunmadıysa varsayılan "kapalı" değer gerçek tercih gibi gösterilmez.
+        if (!settings.loaded) {
+            AppCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Ayarlar yükleniyor…", style = MaterialTheme.typography.bodyMedium)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+            return@AppScreen
+        }
+        if (settings.readError || saveError != null) {
+            AppCard(modifier = Modifier.fillMaxWidth()) {
+                ListRow(
+                    title = if (settings.readError) "Ayarlar okunamadı" else "Kaydedilemedi",
+                    subtitle = if (settings.readError) "Varsayılanlar gösteriliyor; yaptığın değişiklik kaydedilmeye çalışılacak." else saveError,
+                    icon = Icons.Rounded.ErrorOutline,
+                    iconTint = MaterialTheme.colorScheme.error,
+                    onClick = viewModel::clearSaveError,
+                )
+            }
+        }
+
         // ---- Durum ----
         AppCard(modifier = Modifier.fillMaxWidth()) {
             SwitchRow(
-                title = "Deneyleri etkinleştir",
-                subtitle = "Her denemeden sonra sonucu sen bildirirsin; işe yarayan yöntem korunur, diğerleri geri alınır.",
+                title = "Sosyal Erişim",
+                subtitle = "Açık tutma tercihin ve seçtiğin uygulamalar kalıcıdır. Kapatmak süren denemeyi geri alır; onaylı planı kaldırmaz.",
                 icon = Icons.Rounded.Public,
                 checked = settings.socialAccessEnabled,
                 onCheckedChange = viewModel::setSocialAccessEnabled,
@@ -199,20 +254,19 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                         onSelect = viewModel::setSocialAccessMode,
                     )
                     Text(
-                        if (settings.socialAccessMode == TestMode.AUTO_BETA && !autoPossible)
-                            "${platform.displayName} için otomatik içerik gözlemi yok (ya da belirli bir bağlantı girilmedi); bu tur Manuel çalışır."
-                        else if (settings.socialAccessMode == TestMode.AUTO_BETA)
-                            "Herkese açık içerik ayrı bir test penceresinde gözlenir; native uygulamadaki hesabın sonucu değildir."
-                        else "Her yöntemden sonra uygulamayı/sayfayı açıp sonucu bildirirsin.",
+                        if (settings.socialAccessMode == TestMode.AUTO_BETA)
+                            "Otomatik: DPI profilleri adayın gerçek yolundan (yerel motor) ağ düzeyinde ölçülür ve diğer seçili uygulamalarda gerileme olup olmadığına bakılır. " +
+                                (if (autoObserver) "İçerik, ayrı test penceresinde (doğrudan yol) gözlenir." else "İçerik/uygulama sonucu için onayın istenir.")
+                        else "Manuel: her yöntemden sonra uygulamayı/sayfayı açıp sonucu bildirirsin; diğer seçili uygulamalar yine otomatik ölçülür.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (connection != ConnectionState.Connected) {
+                if (!engineConnected) {
                     RowDivider()
                     ListRow(
                         title = "Yerel DPI bağlantısı kapalı",
-                        subtitle = "DPI profillerini denemek için önce bağlanın. Bağlantı olmadan yalnızca resmî web yolu denenir.",
+                        subtitle = "DPI profillerini denemek için önce bağlanın. Bağlantı olmadan yalnız doğrudan ağ yolu ve resmî web yolu denenir.",
                         icon = Icons.Rounded.ErrorOutline,
                         iconTint = MaterialTheme.colorScheme.error,
                         onClick = onOpenHome,
@@ -227,15 +281,17 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
             return@AppScreen
         }
 
-        // ---- Hedef ----
-        SectionHeader("Hedef")
+        // ---- Uygulamalar (çoklu hedef) ----
+        SectionHeader("Uygulamalar")
         AppCard(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Birlikte çalışması gerekenleri seç. Bulunan plan hepsine birlikte uygulanır ve hepsinde ölçülür.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SocialPlatform.entries.forEach { p ->
                         FilterChip(
-                            selected = p == platform,
-                            onClick = { if (p != platform) { platformId = p.id; url = "" } },
+                            selected = p in selected,
+                            onClick = { viewModel.setSocialPlatform(p.id, p !in selected) },
                             label = { Text(p.displayName) },
                         )
                     }
@@ -244,29 +300,89 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                     value = url,
                     onValueChange = { value ->
                         url = value
-                        Target.detectPlatform(value)?.let { platformId = it.id }
+                        viewModel.setSocialTargetUrl(value)
+                        Target.detectPlatform(value)?.let { p -> if (p !in selected) viewModel.setSocialPlatform(p.id, true) }
                     },
-                    placeholder = "${platform.displayName} bağlantısı (isteğe bağlı)",
+                    placeholder = if (SocialPlatform.CUSTOM in selected) "Alan adı ya da içerik bağlantısı" else "Belirli bir içerik bağlantısı (isteğe bağlı)",
                     trailing = {
                         IconButton(onClick = {
                             clipboard.getText()?.text?.let { text ->
                                 url = Target.extractUrl(text)
-                                Target.detectPlatform(url)?.let { platformId = it.id }
+                                viewModel.setSocialTargetUrl(url)
+                                Target.detectPlatform(url)?.let { p -> if (p !in selected) viewModel.setSocialPlatform(p.id, true) }
                             }
                         }) { Icon(Icons.Rounded.ContentPaste, contentDescription = "Yapıştır") }
                     },
                 )
                 Text(
                     when {
-                        url.isBlank() -> "Boş bırakırsan ${platform.displayName} ana sayfası test edilir. Paylaş → Bağlantıyı kopyala ile belirli bir içerik de verebilirsin."
-                        target == null -> "Bu bağlantı ${platform.displayName} içeriği olarak tanınmadı. Resmî bir HTTPS bağlantısı yapıştır."
-                        else -> "Tanındı: ${target.url}"
+                        selected.isEmpty() -> "En az bir uygulama seç."
+                        urlInvalid -> "Bu bağlantı seçili bir platformun içeriği olarak tanınmadı. Resmî bir HTTPS bağlantısı yapıştır" +
+                            " (katalogda olmayan servis için \"Özel alan adı\"nı seç)."
+                        focusTarget != null && focusTarget.contentId != Target.HOME_CONTENT -> "Odak: ${focus?.displayName} · ${focusTarget.url}"
+                        else -> "Bağlantı yoksa her uygulamanın ana adresi ölçülür."
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (url.isNotBlank() && target == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (urlInvalid) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            RowDivider()
+            selected.forEach { p ->
+                val target = targets.firstOrNull { it.platformId == p.id }
+                val result = target?.let { state.results[it.key] }
+                val packages = installed[p.id].orEmpty()
+                val inScope = packages.isEmpty() || packages.any {
+                    net.atom.dpibypass.vpn.AppScope.covers(settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, it)
+                }
+                RowDivider()
+                PlatformRow(
+                    platform = p,
+                    target = target,
+                    result = result,
+                    status = TargetStatusRules.of(result, inScope, engineConnected, SocialAccessRuntime.networkUsable()),
+                    voiceBlocked = settings.disableQuic,
+                    scopeHint = if (inScope) null else scopeHint(settings.appFilterMode, settings.scopeBackupAvailable),
+                    onBringIntoScope = { viewModel.bringIntoScope(packages) },
+                    onReport = { outcome -> target?.let { t -> SocialAccessRuntime.launch { report(t.key, outcome) } } },
+                    reportEnabled = !SocialAccessRuntime.coordinator.active(),
+                )
+            }
+            if (selected.isNotEmpty()) {
+                RowDivider()
+                Column(Modifier.padding(16.dp)) {
+                    AppButton(
+                        text = "Seçilileri şimdi kontrol et",
+                        modifier = Modifier.fillMaxWidth(),
+                        tone = ButtonTone.Tonal,
+                        enabled = targets.isNotEmpty() && state.phase !in BusyPhases && !SocialAccessRuntime.coordinator.active(),
+                        onClick = { SocialAccessRuntime.launch { check(targets) } },
+                    )
+                }
+            }
+        }
+
+        // ---- Plan ----
+        state.plan.strategyId?.let { planId ->
+            SectionHeader("Etkin plan")
+            AppCard(modifier = Modifier.fillMaxWidth()) {
+                ListRow(
+                    title = "Yerel DPI planı: $planId",
+                    subtitle = if (state.plan.installed && engineConnected)
+                        "Motorda çalışıyor. Ayar ve ağ değişikliklerinde korunur; sonuçlar kısaca yeniden doğrulanır."
+                    else "Kayıtlı ama bu bağlantıda kurulu değil (bağlanırken doğrulanamadı ya da bağlantı kapalı). Yeni bir arama başlatabilirsin.",
+                    icon = Icons.Rounded.Public,
+                )
+                if (state.plan.installed && engineConnected) {
+                    RowDivider()
+                    Column(Modifier.padding(16.dp)) {
+                        AppButton("Planı kaldır", { SocialAccessRuntime.launch { clearPlan() } }, modifier = Modifier.fillMaxWidth(), tone = ButtonTone.Tonal)
+                    }
+                }
+            }
+        }
+
+        // ---- Seçenekler ----
+        SectionHeader("Seçenekler")
+        AppCard(modifier = Modifier.fillMaxWidth()) {
             ListRow(
                 title = "Sorun",
                 subtitle = problemLabel(problem),
@@ -274,14 +390,10 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                 onClick = { problemPicker = true },
                 trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
             )
-        }
-
-        // ---- Seçenekler ----
-        SectionHeader("Seçenekler")
-        AppCard(modifier = Modifier.fillMaxWidth()) {
+            RowDivider()
             SwitchRow("Resmî tarayıcı yolunu da dene", officialWeb, { officialWeb = it },
                 subtitle = "Bağlantı tarayıcıda/uygulamada açılır; sonucu kendin kontrol edersin.")
-            if (platform.autoObserver) {
+            if (focus?.autoObserver == true) {
                 RowDivider()
                 SwitchRow("Herkese açık içerik yeterli", publicGoal, { publicGoal = it; if (!it) controlled = false },
                     subtitle = if (publicGoal) "Oturum açmadan görüntülemek yeterli; hesap akışı sayılmaz."
@@ -289,13 +401,13 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                 if (publicGoal) {
                     RowDivider()
                     SwitchRow("Test penceresinde dene", controlled, { controlled = it },
-                        subtitle = "Ayrı, oturumsuz bir WebView açılır. En fazla 6 sayfa yüklemesi; her gözlem 20 sn.")
+                        subtitle = "Ayrı, oturumsuz bir WebView açılır (doğrudan yol; DPI profilinin etkisini ölçmez). En fazla 6 sayfa yüklemesi; her gözlem 20 sn.")
                 }
             }
             RowDivider()
             SwitchRow("Video oynatmayı da sına", needsMedia, { playMedia = it || problem == "MEDIA_PATH_FAILURE" },
                 subtitle = "Yalnızca açılması değil, videonun gerçekten ilerlemesi gerekir.")
-            if (mode == TestMode.AUTO_BETA) {
+            if (mode == TestMode.AUTO_BETA && autoObserver) {
                 RowDivider()
                 SwitchRow("Ölçülü ağda ek veri kullan", allowMetered, { allowMetered = it },
                     subtitle = "Mobil veride test penceresi yalnız bu izinle açılır; veri miktarı tahminidir.")
@@ -306,22 +418,24 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
         SectionHeader("Başlat")
         AppCard(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Sorun şu anda hâlâ var mı?", style = MaterialTheme.typography.labelLarge)
+                Text("${focus?.displayName ?: "Odak uygulama"} için sorun şu anda hâlâ var mı?", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(baseline == true, { baseline = true }, label = { Text("Var") })
                     FilterChip(baseline == false, { baseline = false }, label = { Text("Yok") })
                     FilterChip(baseline == null, { baseline = null }, label = { Text("Emin değilim") })
                 }
                 AppButton(
-                    text = if (state.sessionId.isNotBlank() && state.phase != Phase.FINISHED) "Yeniden başlat" else "Başlat",
+                    text = if (state.sessionId.isNotBlank() && state.phase != Phase.FINISHED) "Yeniden başlat"
+                        else if (targets.size > 1) "Ortak yöntem ara (${targets.size} uygulama)" else "Başlat",
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = state.phase in StartablePhases && target != null,
+                    enabled = state.phase in StartablePhases && focusTarget != null && !urlInvalid,
                     onClick = {
-                        val t = target ?: run { error = "Önce geçerli bir bağlantı gir ya da alanı boş bırak."; return@AppButton }
+                        val t = focusTarget ?: run { error = "Önce bir uygulama seç ya da geçerli bir bağlantı gir."; return@AppButton }
                         error = ""; info = ""
-                        val anonymous = publicGoal && platform.autoObserver
+                        val p = focus ?: return@AppButton
+                        val anonymous = publicGoal && p.autoObserver
                         val goal = Goal(
-                            platformId = platform.id,
+                            platformId = p.id,
                             problemClass = problem,
                             identityContext = if (anonymous) "ANONYMOUS" else "SAME_ACCOUNT",
                             allowedSurfaces = buildSet {
@@ -336,7 +450,8 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                         plannedMethods = catalog.size
                         SocialAccessRuntime.adapter.target = t
                         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true
-                        SocialAccessRuntime.launch { start(goal, t, mode, baseline, metered, allowMetered, catalog) }
+                        val others = targets.filter { it.key != t.key }
+                        SocialAccessRuntime.launch { start(goal, t, mode, baseline, metered, allowMetered, catalog, others) }
                     },
                 )
                 if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -351,7 +466,7 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                 state = state,
                 plannedMethods = plannedMethods,
                 onOpenTarget = { state.target?.let { openUrl(context, it.url) } },
-                onKeep = { id -> viewModel.keepSocialStrategy(id); info = "Kaydedildi: bu ağdaki sonraki bağlantılar bu profille açılır." },
+                onKeep = { id -> viewModel.keepSocialStrategy(id) { ok -> if (ok) { error = ""; info = "Kaydedildi: manuel stratejin de $id oldu." } } },
                 onManual = { viewModel.setSocialAccessMode(TestMode.MANUAL) },
             )
         }
@@ -369,7 +484,7 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
         AppCard(modifier = Modifier.fillMaxWidth()) {
             ListRow(
                 title = "Tanılama raporunu önizle",
-                subtitle = "Yalnız bu cihazda tutulur; bağlantı, hesap veya ağ kimliği içermez.",
+                subtitle = "Yalnız bu cihazda tutulur; bağlantı, hesap veya ağ kimliği içermez. Sürümler, plan, hedef başına sonuç ve hata sınıfları.",
                 icon = Icons.Rounded.Description,
                 onClick = {
                     scope.launch {
@@ -421,6 +536,68 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
     }
 }
 
+/** Kapsam dışı uyarısı: neden dışarıda olduğu açıkça yazılır. */
+private fun scopeHint(mode: net.atom.dpibypass.data.AppFilterMode, discordBackup: Boolean) = when (mode) {
+    net.atom.dpibypass.data.AppFilterMode.Include -> "Uygulamalar \"Yalnızca seçili\" kipinde ve bu uygulama listede değil" +
+        (if (discordBackup) " (kurulumdaki \"Sadece Discord\" seçimi)." else ".") + " Trafiği tünele girmiyor."
+    net.atom.dpibypass.data.AppFilterMode.Exclude -> "Uygulama \"Seçili hariç\" listesinde; trafiği tünele girmiyor."
+    net.atom.dpibypass.data.AppFilterMode.All -> null
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PlatformRow(
+    platform: SocialPlatform,
+    target: Target?,
+    result: TargetResult?,
+    status: TargetStatus,
+    voiceBlocked: Boolean,
+    scopeHint: String?,
+    onBringIntoScope: () -> Unit,
+    onReport: (String) -> Unit,
+    reportEnabled: Boolean,
+) {
+    val bad = status in setOf(TargetStatus.OUT_OF_SCOPE, TargetStatus.NOT_WORKING, TargetStatus.NETWORK_BLOCKED, TargetStatus.NO_NETWORK)
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (platform == SocialPlatform.CUSTOM) target?.key?.removePrefix("custom:") ?: platform.displayName else platform.displayName,
+                style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            TagBadge(TargetStatusRules.label(status), color = if (bad) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+        }
+        // Özellikler ayrı gösterilir: ağ yolunun açılması içerik, medya ya da sesin çalıştığını kanıtlamaz.
+        Text(
+            buildList {
+                add("Ağ: " + SocialText.check(result?.network ?: Check(), platform.mode(Capability.NETWORK)))
+                if (platform.mode(Capability.CONTENT) != CheckMode.UNSUPPORTED || platform.mode(Capability.NATIVE_APP) != CheckMode.UNSUPPORTED)
+                    add("İçerik/uygulama: " + SocialText.check(result?.content ?: Check(), CheckMode.MANUAL.takeIf { platform.mode(Capability.CONTENT) != CheckMode.AUTO } ?: CheckMode.AUTO))
+                if (platform.mode(Capability.MEDIA) != CheckMode.UNSUPPORTED) add("Medya: " + if (platform.mode(Capability.MEDIA) == CheckMode.AUTO) "test penceresinde otomatik" else "onayın gerekli")
+                if (platform.mode(Capability.VOICE) != CheckMode.UNSUPPORTED) add("Ses (UDP): " + if (voiceBlocked) "kapalı — QUIC/UDP engelleme ayarı açık" else "onayın gerekli")
+            }.joinToString(" · "),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        result?.takeIf { it.network.status != CheckStatus.PASS && it.failureClass.isNotBlank() && !it.stale }?.let {
+            Text("Ağ ölçümü: " + SocialText.failure(it.failureClass), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        result?.conflict?.takeIf { it.isNotBlank() }?.let {
+            Text("Çakışma: \"$it\" bu uygulamayı bozduğu için reddedildi.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        if (platform.note.isNotBlank()) Text(platform.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        scopeHint?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onBringIntoScope) { Text("Kapsama ekle") }
+        }
+        if (result != null && reportEnabled && status != TargetStatus.OUT_OF_SCOPE) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { onReport("RESOLVED") }) { Text("Çalışıyor") }
+                TextButton(onClick = { onReport("PARTIAL") }) { Text("Kısmen") }
+                TextButton(onClick = { onReport("STILL_PRESENT") }) { Text("Çalışmıyor") }
+                TextButton(onClick = { onReport("NOT_TESTED") }) { Text("Test edemedim") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun TrialCard(
     state: TrialState,
@@ -456,11 +633,12 @@ private fun TrialCard(
             }
             Text(
                 buildString {
+                    if (state.targets.size > 1) append("${state.targets.size} uygulama · ")
                     append("Yöntem ${state.attempted}")
                     if (plannedMethods > 0) append("/$plannedMethods")
                     append(" · Bağlantı: ${SocialText.technical(state.technicalOutcome)}")
                     if (state.mode == TestMode.AUTO_BETA) append(" · İçerik: ${SocialText.verdict(state.autoVerdict)}")
-                    append(" · Test ${state.requests}/24")
+                    append(" · Test ${state.requests}")
                     if (state.rendererLoads > 0) append(" · Sayfa ${state.rendererLoads}/6")
                     if (state.deferred.isNotEmpty()) append(" · Ertelenen ${state.deferred.size}")
                 },
@@ -488,8 +666,19 @@ private fun TrialCard(
             if (state.phase in setOf(Phase.AUTO_EVALUATING, Phase.PROBING) || state.phase == Phase.PAUSED && state.pauseReason == "USER_ACTION_REQUIRED")
                 AppButton("Açıldı, burada dur", { SocialAccessRuntime.launch { feedback(state.feedback("RESOLVED")) } }, modifier = Modifier.fillMaxWidth(), tone = ButtonTone.Tonal)
             val kept = state.candidate?.strategyId
-            if (state.resourceDisposition == "KEPT_ACTIVE" && kept != null)
-                AppButton("Bu ağ için varsayılan yap", { onKeep(kept) }, modifier = Modifier.fillMaxWidth())
+            if (state.resourceDisposition == "KEPT_ACTIVE" && kept != null && state.plan.strategyId == kept)
+                AppButton("Manuel stratejim de bu olsun", { onKeep(kept) }, modifier = Modifier.fillMaxWidth(), tone = ButtonTone.Tonal)
+            if (state.finishReason == "NETWORK_VERIFIED_AUTO" && state.plan.installed) {
+                HorizontalDivider()
+                Text("Ağ yolu otomatik doğrulandı. ${state.target?.let { SocialPlatform.byId(it.platformId)?.displayName } ?: "Uygulama"} içinde içerik açılıyor mu?",
+                    style = MaterialTheme.typography.labelLarge)
+                AppButton("Hedefi aç", onOpenTarget, modifier = Modifier.fillMaxWidth(), tone = ButtonTone.Tonal)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppButton("Açıldı", { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "RESOLVED") } } }, modifier = Modifier.weight(1f))
+                    AppButton("Hâlâ açılmıyor", { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "STILL_PRESENT") } } },
+                        modifier = Modifier.weight(1f), tone = ButtonTone.Tonal)
+                }
+            }
             if (state.mode == TestMode.AUTO_BETA && (state.phase != Phase.FINISHED || state.deferred.isNotEmpty())) TextButton(onClick = onManual) { Text("Manuel devam et") }
             if (state.finishReason == "RESOLVED_AUTO_OBSERVED") TextButton(onClick = { SocialAccessRuntime.launch { correctAutoPass() } }) { Text("Bende hâlâ sorun var") }
             if (state.phase == Phase.PAUSED && state.pauseReason in setOf("BUDGET_LIMIT", "USER_ACTION_REQUIRED"))
@@ -510,10 +699,10 @@ private fun HowItWorks() {
     AppCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(
-                "1. Platformu seç, istersen açılmayan içeriğin bağlantısını yapıştır.",
-                "2. Uygulama mevcut tünelde yerel DPI profillerini (ISS'ne göre sıralı) tek tek dener.",
-                "3. Her denemeden sonra içeriği açıp sonucu bildirirsin; işe yarayan profil korunur, diğerleri geri alınır.",
-                "Trafik uzak bir sunucuya yönlendirilmez. Profil, tünelden geçen bütün seçili uygulamaları etkiler.",
+                "1. Birlikte çalışması gereken uygulamaları seç; istersen açılmayan içeriğin bağlantısını yapıştır.",
+                "2. Uygulama mevcut tünelde yerel DPI profillerini (ISS'ne göre sıralı) tek tek dener ve her birini seçili BÜTÜN uygulamalarda ölçer.",
+                "3. Çalışan bir uygulamayı bozan profil reddedilir. İşe yarayan profil motorun planı olur; ayar ya da ağ değişince kaybolmaz.",
+                "Trafik uzak bir sunucuya yönlendirilmez. Plan, tünelden geçen bütün uygulamaları etkiler; giriş, yaş doğrulama ve hesap kısıtları yerel ayarla çözülmez.",
             ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
@@ -538,6 +727,7 @@ private fun problemLabel(value: String) = when (value) {
 private fun finishLabel(value: String) = when (value) {
     "RESOLVED_USER_REPORTED" -> "Erişim bildirdin; çalışan yöntem korunuyor."
     "RESOLVED_AUTO_OBSERVED" -> "Test penceresinde çalıştı; kapsam yalnız test penceresi."
+    "NETWORK_VERIFIED_AUTO" -> "Ağ yolu otomatik doğrulandı ve plan korunuyor; içerik/uygulama için onayın gerekiyor."
     "ALREADY_ACCESSIBLE" -> "Başlangıçta zaten açıktı; yöntem denenmedi."
     "AUTO_UNAVAILABLE" -> "Bu hedef için otomatik içerik gözlemi yok; Manuel devam edebilirsin."
     "AUTO_INCONCLUSIVE" -> "Otomatik sonuç belirsiz; ertelenen yöntemler Manuel denenebilir."

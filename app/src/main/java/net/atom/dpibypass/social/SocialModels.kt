@@ -43,6 +43,10 @@ data class Goal(val platformId: String = "youtube", val problemClass: String = "
 }
 
 data class Target(val platformId: String, val url: String, val contentId: String, val targetRef: String = UUID.randomUUID().toString()) {
+    /** Hedef sonuçlarının anahtarı: platform başına bir sonuç; özel alan adında alan adı başına. */
+    val key: String get() = if (platformId == SocialPlatform.CUSTOM.id) "custom:" + (runCatching { URI(url).host }.getOrNull() ?: url) else platformId
+    /** Ağ yolu kontrolünün adresi: içerik bağlantısı verilmediyse platformun kontrol adresi. */
+    val probeUrl: String get() = if (contentId == HOME_CONTENT) SocialPlatform.byId(platformId)?.probeUrl?.ifEmpty { url } ?: url else url
     companion object {
         fun resourceAllowed(raw: String): Boolean = runCatching {
             val u = URI(raw)
@@ -53,7 +57,7 @@ data class Target(val platformId: String, val url: String, val contentId: String
         }.getOrDefault(false)
         /** Platform ana sayfası; bağlantı verilmediğinde Manuel testin hedefi. */
         const val HOME_CONTENT = "home"
-        fun home(platform: String): Target? = SocialPlatform.byId(platform)?.let { Target(it.id, it.homeUrl, HOME_CONTENT) }
+        fun home(platform: String): Target? = SocialPlatform.byId(platform)?.takeIf { it.homeUrl.isNotEmpty() }?.let { Target(it.id, it.homeUrl, HOME_CONTENT) }
 
         /** Paylaşım metninden ("Şuna bak: https://…") ilk bağlantıyı ayıklar. */
         fun extractUrl(text: String): String {
@@ -65,7 +69,7 @@ data class Target(val platformId: String, val url: String, val contentId: String
         /** Bağlantının ait olduğu platform; tanınmıyorsa null. */
         fun detectPlatform(raw: String): SocialPlatform? = runCatching {
             val host = URI(normalize(raw)).host?.lowercase() ?: return null
-            SocialPlatform.entries.firstOrNull { it.owns(host) }
+            SocialPlatform.catalog.firstOrNull { it.owns(host) }
         }.getOrNull()
 
         /** Şemasız girişe ("youtube.com/…") https eklenir; http:// olduğu gibi kalır ve reddedilir. */
@@ -102,6 +106,17 @@ data class Target(val platformId: String, val url: String, val contentId: String
                     val kind = when (match.groupValues[1]) { "reels", "reel" -> "reel"; else -> "p" }
                     canonical = "https://www.instagram.com/$kind/$id/"
                 }
+                "custom" -> {
+                    // Herkese açık bir alan adı olmalı: IP sabiti, tek etiketli ad ve
+                    // yerel ağ son ekleri reddedilir. Adresin kendisi probe sırasında
+                    // PublicTargetAddress ile ayrıca denetlenir.
+                    if (host.length > 253 || !host.matches(Regex("(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}"))) return null
+                    if (listOf(".local", ".lan", ".internal", ".home", ".arpa", ".localhost").any { host.endsWith(it) }) return null
+                    if (SocialPlatform.catalog.any { it.owns(host) }) return null
+                    if (path.length > 200 || !path.matches(Regex("/[A-Za-z0-9._~@%+\\-/]*"))) return null
+                    id = HOME_CONTENT
+                    canonical = "https://$host$path"
+                }
                 else -> {
                     val p = SocialPlatform.byId(platform) ?: return null
                     if (p.autoObserver || !p.owns(host)) return null
@@ -117,26 +132,103 @@ data class Target(val platformId: String, val url: String, val contentId: String
     }
 }
 
+/** Bir platform için ayrı ayrı değerlendirilen özellikler. */
+enum class Capability { NETWORK, CONTENT, MEDIA, VOICE, NATIVE_APP }
+
+/** Bir özelliğin nasıl doğrulanabildiği. */
+enum class CheckMode { AUTO, MANUAL, UNSUPPORTED }
+
 /**
- * Desteklenen platformlar. [autoObserver] yalnızca test penceresinde içerik
- * gözlemcisi (social-observer.js) olan platformlarda açıktır; diğerleri bağlantı
- * testi + kullanıcı bildirimiyle (Manuel) çalışır.
+ * Sürümlü platform kataloğu. Her girdi yalnızca doğrulanmış verileri taşır:
+ *  - [packages]: platformun resmî Android paket adları (kapsam kontrolü için)
+ *  - [hosts]: bağlantı tanıma için sahip olunan alan adları (paylaşılan CDN'ler
+ *    bilinçli olarak YOK: bir CDN'in tamamı bir platforma ait sayılmaz)
+ *  - [probeUrl]: düşük maliyetli ağ yolu kontrolü (TLS + HTTP yanıtı). Yalnızca
+ *    teknik ağ erişimini gösterir; içerik/hesap/uygulama başarısı değildir.
+ *  - [probeHosts]: bağlanırken yapılan strateji doğrulamasında TLS el sıkışması
+ *    denenen alan adları (çoklu uygulama ortak planı bunlarla aranır)
+ *  - [features]: hangi özelliğin otomatik, hangisinin kullanıcı onayıyla
+ *    doğrulanabildiği. Burada AUTO yazmayan hiçbir şey otomatik "doğrulandı" olmaz.
+ *  - [note]: bilinen sınır (ör. native uygulamanın kendi protokolü).
+ *
+ * [autoObserver] yalnızca test penceresinde içerik gözlemcisi (social-observer.js)
+ * olan platformlarda açıktır.
  */
 enum class SocialPlatform(val id: String, val displayName: String, val hosts: Set<String>, val homeUrl: String,
-    val autoObserver: Boolean, val queryKeys: Set<String> = emptySet()) {
-    YOUTUBE("youtube", "YouTube", setOf("youtube.com", "youtu.be"), "https://www.youtube.com/", true),
-    INSTAGRAM("instagram", "Instagram", setOf("instagram.com"), "https://www.instagram.com/", true),
-    X("x", "X (Twitter)", setOf("x.com", "twitter.com"), "https://x.com/", false),
-    TIKTOK("tiktok", "TikTok", setOf("tiktok.com"), "https://www.tiktok.com/", false),
-    DISCORD("discord", "Discord", setOf("discord.com", "discord.gg", "discordapp.com"), "https://discord.com/app", false),
-    REDDIT("reddit", "Reddit", setOf("reddit.com", "redd.it"), "https://www.reddit.com/", false),
-    FACEBOOK("facebook", "Facebook", setOf("facebook.com", "fb.watch", "fb.com"), "https://www.facebook.com/", false, setOf("v", "story_fbid", "id"));
+    val autoObserver: Boolean, val queryKeys: Set<String> = emptySet(), val packages: Set<String> = emptySet(),
+    val probeHosts: List<String> = emptyList(), val features: Map<Capability, CheckMode> = emptyMap(),
+    val note: String = "", private val probe: String? = null) {
+    YOUTUBE("youtube", "YouTube", setOf("youtube.com", "youtu.be"), "https://www.youtube.com/", true,
+        packages = setOf("com.google.android.youtube"), probeHosts = listOf("www.youtube.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.AUTO,
+            Capability.MEDIA to CheckMode.AUTO, Capability.NATIVE_APP to CheckMode.MANUAL),
+        note = "İçerik/medya otomatik gözlemi yalnız belirli herkese açık video bağlantısında ve test penceresinde (doğrudan yol) çalışır."),
+    INSTAGRAM("instagram", "Instagram", setOf("instagram.com"), "https://www.instagram.com/", true,
+        packages = setOf("com.instagram.android"), probeHosts = listOf("www.instagram.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.AUTO,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL),
+        note = "İçerik otomatik gözlemi yalnız belirli herkese açık gönderi bağlantısında ve test penceresinde çalışır."),
+    X("x", "X (Twitter)", setOf("x.com", "twitter.com"), "https://x.com/", false,
+        packages = setOf("com.twitter.android"), probeHosts = listOf("x.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    TIKTOK("tiktok", "TikTok", setOf("tiktok.com"), "https://www.tiktok.com/", false,
+        packages = setOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"), probeHosts = listOf("www.tiktok.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    DISCORD("discord", "Discord", setOf("discord.com", "discord.gg", "discordapp.com"), "https://discord.com/app", false,
+        packages = setOf("com.discord"), probeHosts = listOf("discord.com", "gateway.discord.gg", "cdn.discordapp.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.VOICE to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL),
+        note = "Ana sayfanın açılması sesli görüşmenin çalıştığını kanıtlamaz; ses UDP gerektirir."),
+    REDDIT("reddit", "Reddit", setOf("reddit.com", "redd.it"), "https://www.reddit.com/", false,
+        packages = setOf("com.reddit.frontpage"), probeHosts = listOf("www.reddit.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    FACEBOOK("facebook", "Facebook", setOf("facebook.com", "fb.watch", "fb.com"), "https://www.facebook.com/", false, setOf("v", "story_fbid", "id"),
+        packages = setOf("com.facebook.katana"), probeHosts = listOf("www.facebook.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    // Aşağıdakiler erişimleri engellenmiş varsayılarak EKLENMEDİ: kullanıcı kendi
+    // ağında sorun yaşıyorsa ağ yolunu ölçebilsin ve aynı ortak plana dahil
+    // edebilsin diye vardır. Yalnız teknik ağ yolu otomatik ölçülür.
+    TELEGRAM("telegram", "Telegram", setOf("telegram.org", "t.me", "telegram.me"), "https://web.telegram.org/", false,
+        packages = setOf("org.telegram.messenger"), probeHosts = listOf("web.telegram.org"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.NATIVE_APP to CheckMode.MANUAL, Capability.VOICE to CheckMode.MANUAL),
+        note = "Web kontrolü yalnız web istemcisinin ağ yolunu ölçer; uygulama kendi protokolüyle IP adreslerine bağlanır."),
+    WHATSAPP("whatsapp", "WhatsApp", setOf("whatsapp.com", "wa.me"), "https://web.whatsapp.com/", false,
+        packages = setOf("com.whatsapp", "com.whatsapp.w4b"), probeHosts = listOf("web.whatsapp.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.NATIVE_APP to CheckMode.MANUAL, Capability.VOICE to CheckMode.MANUAL),
+        note = "Web kontrolü mesajlaşmanın veya aramaların çalıştığını kanıtlamaz."),
+    SIGNAL("signal", "Signal", setOf("signal.org", "signal.me"), "https://signal.org/", false,
+        packages = setOf("org.thoughtcrime.securesms"), probeHosts = listOf("chat.signal.org"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.NATIVE_APP to CheckMode.MANUAL, Capability.VOICE to CheckMode.MANUAL),
+        note = "Ağ kontrolü Signal servis uç noktasının TLS/HTTP yanıtını ölçer; mesaj iletimi kullanıcı onayıyla doğrulanır.",
+        probe = "https://chat.signal.org/"),
+    TWITCH("twitch", "Twitch", setOf("twitch.tv"), "https://www.twitch.tv/", false,
+        packages = setOf("tv.twitch.android.app"), probeHosts = listOf("www.twitch.tv"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL,
+            Capability.MEDIA to CheckMode.MANUAL, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    SNAPCHAT("snapchat", "Snapchat", setOf("snapchat.com"), "https://www.snapchat.com/", false,
+        packages = setOf("com.snapchat.android"), probeHosts = listOf("www.snapchat.com"),
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.NATIVE_APP to CheckMode.MANUAL)),
+    /** Katalogda olmayan bir servis: kullanıcının verdiği herkese açık HTTPS alan adı. */
+    CUSTOM("custom", "Özel alan adı", emptySet(), "", false,
+        features = mapOf(Capability.NETWORK to CheckMode.AUTO, Capability.CONTENT to CheckMode.MANUAL),
+        note = "Yalnız verdiğin alan adının ağ yolu ölçülür; ilgili uygulamanın başka sunucuları bilinmez.");
 
     fun owns(host: String): Boolean = hosts.any { host == it || host.endsWith(".$it") }
+    /** Ağ yolu kontrolünün adresi; özel alan adında hedefin kendisi kullanılır. */
+    val probeUrl: String get() = probe ?: homeUrl
+    fun mode(capability: Capability): CheckMode = features[capability] ?: CheckMode.UNSUPPORTED
 
     companion object {
+        /** Katalog veri sürümü; tanılama çıktısına yazılır. Girdi değişince artırılır. */
+        const val CATALOG_VERSION = "2026-10-23.1"
         fun byId(id: String?): SocialPlatform? = entries.firstOrNull { it.id == id }
         fun supportsAutoObserver(id: String?): Boolean = byId(id)?.autoObserver == true
+        /** Kullanıcıya seçim olarak sunulan katalog platformları (özel alan adı ayrıca). */
+        val catalog: List<SocialPlatform> get() = entries.filter { it != CUSTOM }
     }
 }
 
@@ -155,10 +247,36 @@ object SocialText {
         return when {
             http != null && http in 200..399 -> "$route: sunucuya ulaşıldı (HTTP $http)"
             http == 429 -> "$route: hız sınırı (HTTP 429)"
+            http != null && http in 400..499 -> "$route: sunucuya ulaşıldı, sunucu HTTP $http döndü (ağ yolu açık; içerik ayrı)"
             http != null -> "$route: sunucu yanıt verdi ama hata döndü (HTTP $http)"
-            "TRANSPORT_UNKNOWN" in parts -> "$route: bağlantı kurulamadı"
-            else -> "$route: sonuç belirsiz"
+            else -> "$route: " + failure(parts.lastOrNull().orEmpty())
         }
+    }
+
+    /** Ölçülen hata sınıfının okunur adı; kesin teşhis iddiası taşımaz. */
+    fun failure(cls: String): String = when (cls) {
+        "DNS_FAILURE" -> "alan adı çözülemedi"
+        "DNS_NON_PUBLIC_ANSWER" -> "DNS yerel/özel bir adres döndürdü (DNS müdahalesi şüphesi)"
+        "TLS_CERT_MISMATCH" -> "sertifika doğrulanamadı (araya giren sayfa ya da giriş portalı olabilir)"
+        "TLS_HANDSHAKE_FAILED", "TLS_FAILURE" -> "TLS el sıkışması kesildi (SNI/DPI müdahalesi şüphesi)"
+        "TCP_REFUSED" -> "bağlantı reddedildi"
+        "TCP_RESET" -> "bağlantı sıfırlandı (DPI müdahalesi şüphesi)"
+        "TCP_TIMEOUT" -> "bağlantı zaman aşımına uğradı (tek ölçümle kesin değil)"
+        "READ_TIMEOUT" -> "yanıt zaman aşımına uğradı"
+        "RATE_LIMITED" -> "hız sınırı"
+        "SERVICE_ERROR" -> "sunucu hata döndü (kesinti olabilir)"
+        "NO_VALIDATED_NETWORK" -> "doğrulanmış internet bağlantısı yok (ağ yok ya da giriş portalı)"
+        "TRANSPORT_UNKNOWN" -> "bağlantı kurulamadı"
+        else -> "sonuç belirsiz"
+    }
+
+    fun check(c: Check, mode: CheckMode): String = when {
+        mode == CheckMode.UNSUPPORTED -> "ölçülmez"
+        c.status == CheckStatus.PASS -> if (c.source == CheckSource.USER) "çalışıyor (onayın)" else "açık (otomatik)"
+        c.status == CheckStatus.PARTIAL -> "kısmen (onayın)"
+        c.status == CheckStatus.FAIL -> if (c.source == CheckSource.USER) "çalışmıyor (bildirimin)" else "kapalı (otomatik)"
+        c.status == CheckStatus.MANUAL_REQUIRED || mode == CheckMode.MANUAL -> "onayın gerekli"
+        else -> "ölçülmedi"
     }
     fun technical(outcome: String): String = when (outcome) {
         "PASS" -> "Ağ yolu açık"
@@ -196,7 +314,136 @@ object SocialText {
         "USER_UNABLE_TO_TEST" -> "Test edilemedi olarak işaretlendi."
         "USER_INACTIVE" -> "Yanıt gelmediği için deneme geri alındı."
         "CONTEXT_CHANGED" -> "Ağ veya ayarlar değişti; yeniden başlatın."
+        "NETWORK_UNAVAILABLE" -> "Doğrulanmış internet bağlantısı yok; ağ gelince yeniden başlatın."
         else -> null
+    }
+}
+
+/** Bir özelliğin ölçülen/bildirilen durumu. */
+enum class CheckStatus { PASS, PARTIAL, FAIL, UNKNOWN, MANUAL_REQUIRED }
+enum class CheckSource { NONE, AUTO, USER }
+data class Check(val status: CheckStatus = CheckStatus.UNKNOWN, val source: CheckSource = CheckSource.NONE, val detail: String = "")
+
+/**
+ * Bir hedefin (platform ya da özel alan adı) son sonucu. Her hedef ayrı tutulur:
+ * birinin başarısı diğerininki sayılmaz, başarısız biri çalışanları silmez.
+ *  - [network]: teknik ağ yolu (otomatik ölçüm, yalnız TLS+HTTP yanıtı)
+ *  - [content]: içerik/uygulama (test penceresi gözlemi ya da kullanıcı bildirimi)
+ *  - [strategyId]: sonucun ölçüldüğü motor planı
+ *  - [stale]: bağlam (ağ, DNS, kapsam, süreç) değişti; yeniden doğrulanmadan
+ *    güncel başarı diye gösterilmez.
+ */
+data class TargetResult(val key: String, val platformId: String, val network: Check = Check(), val content: Check = Check(),
+    val strategyId: String? = null, val contextGeneration: Long = 0, val verifiedAtMs: Long = 0, val stale: Boolean = false,
+    val failureClass: String = "", val conflict: String = "") {
+    val working: Boolean get() = !stale && network.status == CheckStatus.PASS && content.status != CheckStatus.FAIL
+}
+
+/** Bir hedefin kullanıcıya gösterilen tek durumu; birbirine karışmaması için ayrı sınıflar. */
+enum class TargetStatus { OUT_OF_SCOPE, NO_ENGINE, NO_NETWORK, NOT_CHECKED, VERIFYING, WORKING, NETWORK_OPEN_CONFIRM, PARTIAL, NOT_WORKING, NETWORK_BLOCKED, UNCERTAIN }
+
+object TargetStatusRules {
+    /**
+     * Öncelik: kapsam dışı > ağ yok > bayat (yeniden doğrulanmalı) > kullanıcı
+     * bildirimi > otomatik ağ ölçümü. Otomatik ağ ölçümü tek başına "çalışıyor"
+     * üretmez; içerik/uygulama için kullanıcı onayı ayrı istenir.
+     */
+    fun of(result: TargetResult?, inScope: Boolean, engineConnected: Boolean, networkUsable: Boolean): TargetStatus = when {
+        !inScope -> TargetStatus.OUT_OF_SCOPE
+        !networkUsable -> TargetStatus.NO_NETWORK
+        result == null -> if (engineConnected) TargetStatus.NOT_CHECKED else TargetStatus.NO_ENGINE
+        result.stale -> TargetStatus.VERIFYING
+        result.content.status == CheckStatus.FAIL && result.content.source == CheckSource.USER -> TargetStatus.NOT_WORKING
+        result.content.status == CheckStatus.PARTIAL -> TargetStatus.PARTIAL
+        result.network.status == CheckStatus.PASS && result.content.status == CheckStatus.PASS -> TargetStatus.WORKING
+        result.network.status == CheckStatus.PASS -> TargetStatus.NETWORK_OPEN_CONFIRM
+        result.network.status == CheckStatus.FAIL -> TargetStatus.NETWORK_BLOCKED
+        else -> TargetStatus.UNCERTAIN
+    }
+
+    fun label(s: TargetStatus): String = when (s) {
+        TargetStatus.OUT_OF_SCOPE -> "Kapsam dışı"
+        TargetStatus.NO_ENGINE -> "Bağlantı kapalı"
+        TargetStatus.NO_NETWORK -> "Ağ yok"
+        TargetStatus.NOT_CHECKED -> "Kontrol edilmedi"
+        TargetStatus.VERIFYING -> "Yeniden doğrulanmalı"
+        TargetStatus.WORKING -> "Çalışıyor"
+        TargetStatus.NETWORK_OPEN_CONFIRM -> "Ağ açık · onay bekliyor"
+        TargetStatus.PARTIAL -> "Kısmi erişim"
+        TargetStatus.NOT_WORKING -> "Çalışmıyor"
+        TargetStatus.NETWORK_BLOCKED -> "Ağ yolu kapalı"
+        TargetStatus.UNCERTAIN -> "Belirsiz"
+    }
+}
+
+/** Sonuçların sürümlü JSON biçimi. Bozuk/bilinmeyen kayıt yok sayılır, uygulama çökmez. */
+object TargetResultCodec {
+    const val SCHEMA = 1
+    fun encode(results: Collection<TargetResult>, planStrategyId: String?): JSONObject = JSONObject().put("schemaVersion", SCHEMA)
+        .put("catalogVersion", SocialPlatform.CATALOG_VERSION).put("planStrategyId", planStrategyId ?: "")
+        .put("results", org.json.JSONArray(results.map { r -> JSONObject().put("key", r.key).put("platformId", r.platformId)
+            .put("network", r.network.status.name).put("networkSource", r.network.source.name)
+            .put("content", r.content.status.name).put("contentSource", r.content.source.name)
+            .put("strategyId", r.strategyId ?: "").put("verifiedAtMs", r.verifiedAtMs).put("failureClass", r.failureClass) }))
+
+    /** Süreç yeniden başladıktan sonra okunan her sonuç BAYATTIR: yeniden ölçülmeden güncel sayılmaz. */
+    fun decode(raw: String?): Pair<Map<String, TargetResult>, String?> = runCatching {
+        val j = JSONObject(raw ?: return emptyMap<String, TargetResult>() to null)
+        if (j.optInt("schemaVersion") != SCHEMA) return emptyMap<String, TargetResult>() to null
+        val array = j.optJSONArray("results") ?: org.json.JSONArray()
+        val results = (0 until array.length()).mapNotNull { i ->
+            val o = array.optJSONObject(i) ?: return@mapNotNull null
+            val platform = o.optString("platformId")
+            if (SocialPlatform.byId(platform) == null || o.optString("key").isBlank()) return@mapNotNull null
+            fun status(k: String) = CheckStatus.entries.firstOrNull { it.name == o.optString(k) } ?: CheckStatus.UNKNOWN
+            fun source(k: String) = CheckSource.entries.firstOrNull { it.name == o.optString(k) } ?: CheckSource.NONE
+            TargetResult(o.optString("key"), platform, Check(status("network"), source("networkSource")), Check(status("content"), source("contentSource")),
+                o.optString("strategyId").ifBlank { null }, 0, o.optLong("verifiedAtMs"), stale = true, failureClass = o.optString("failureClass"))
+        }.associateBy { it.key }
+        results to j.optString("planStrategyId").ifBlank { null }
+    }.getOrDefault(emptyMap<String, TargetResult>() to null)
+}
+
+/**
+ * Ağ yolu ölçümünün sınıflandırması. Yalnız ölçülebilen kanıta göre sınıf verir;
+ * tek bir zaman aşımı kesin engel sayılmaz (UNKNOWN kalır).
+ */
+object ProbeClassifier {
+    /** HTTP yanıtı, doğrulanmış TLS üzerinden alındı: ağ yolu açık, içerik başarısı DEĞİL. */
+    fun fromHttp(route: String, code: Int, retryAfter: String?, nowMs: Long, bytes: Long): NetworkEvidence = when {
+        code == 429 -> NetworkEvidence("UNKNOWN", bytes, reason = "$route:HTTP_429:RATE_LIMITED", retryAfterSeconds = retryAfterSeconds(retryAfter, nowMs),
+            failureClass = "RATE_LIMITED", httpStatus = code)
+        code == 503 && retryAfter != null -> NetworkEvidence("UNKNOWN", bytes, reason = "$route:HTTP_503:SERVICE_ERROR",
+            retryAfterSeconds = retryAfterSeconds(retryAfter, nowMs), failureClass = "SERVICE_ERROR", httpStatus = code)
+        code in 500..599 -> NetworkEvidence("UNKNOWN", bytes, reason = "$route:HTTP_$code:SERVICE_ERROR", failureClass = "SERVICE_ERROR", httpStatus = code)
+        code in 200..499 -> NetworkEvidence("PASS", bytes, reason = "$route:HTTP_$code:NETWORK_PATH_ONLY", httpStatus = code)
+        else -> NetworkEvidence("UNKNOWN", bytes, reason = "$route:HTTP_$code:UNEXPECTED", failureClass = "HTTP_UNEXPECTED", httpStatus = code)
+    }
+
+    fun fromException(route: String, e: Throwable): NetworkEvidence {
+        val message = e.message.orEmpty()
+        val (outcome, cls) = when (e) {
+            is java.net.UnknownHostException -> "FAIL" to if ("PUBLIC_TARGET_REQUIRED" in message) "DNS_NON_PUBLIC_ANSWER" else "DNS_FAILURE"
+            is javax.net.ssl.SSLPeerUnverifiedException -> "FAIL" to "TLS_CERT_MISMATCH"
+            is javax.net.ssl.SSLHandshakeException -> "FAIL" to "TLS_HANDSHAKE_FAILED"
+            is javax.net.ssl.SSLException -> "FAIL" to "TLS_FAILURE"
+            is java.net.ConnectException -> "FAIL" to "TCP_REFUSED"
+            is java.net.SocketTimeoutException -> "UNKNOWN" to if ("connect" in message.lowercase()) "TCP_TIMEOUT" else "READ_TIMEOUT"
+            is java.net.SocketException -> if ("reset" in message.lowercase()) "FAIL" to "TCP_RESET" else "UNKNOWN" to "TRANSPORT_UNKNOWN"
+            else -> "UNKNOWN" to "TRANSPORT_UNKNOWN"
+        }
+        return NetworkEvidence(outcome, bytes = 0, reason = "$route:$cls", failureClass = cls)
+    }
+
+    /** `Retry-After`: saniye ya da HTTP-date. Geçersizse 60 sn; 1 sn..24 sa aralığına sıkıştırılır. */
+    fun retryAfterSeconds(value: String?, nowMs: Long): Long {
+        val v = value?.trim().orEmpty()
+        if (v.isEmpty()) return 60
+        v.toLongOrNull()?.let { return it.coerceIn(1, 86_400) }
+        return runCatching {
+            val at = java.time.ZonedDateTime.parse(v, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
+            ((at - nowMs + 999) / 1000).coerceIn(1, 86_400)
+        }.getOrDefault(60)
     }
 }
 
@@ -273,6 +520,14 @@ data class CandidateDefinition(val schemaVersion: Int = 2, val id: String, val f
     val effectKey: String = "$family:$strategyId:$surface", val candidateVersion: String = "1.0.0",
     val rollbackKind: String = "RELEASE_OWNED_RESOURCES_ONLY")
 
+/**
+ * Motordaki onaylı plan. [installed] motorun bu planla gerçekten çalıştığını
+ * (servisin bildirdiği), [operationId] planı kuran işlemi gösterir; geri alma
+ * yalnızca bu işlem için yapılabilir.
+ */
+data class PlanState(val strategyId: String? = null, val operationId: String = "", val installed: Boolean = false,
+    val source: String = "NONE")
+
 data class Feedback(val sessionId: String, val attemptId: String, val operationId: String, val contextGeneration: Long,
     val modeGeneration: Long, val eventId: String, val expectedStateVersion: Long, val outcome: String)
 
@@ -283,6 +538,14 @@ data class TrialState(val phase: Phase = Phase.DISABLED, val mode: TestMode = Te
     val message: String = "", val technicalOutcome: String = "UNKNOWN", val autoVerdict: Verdict = Verdict.NOT_RUN,
     val userOutcome: String = "NOT_TESTED", val deferred: List<String> = emptyList(), val attempted: Int = 0,
     val requests: Int = 0, val diagnosticBytes: Long = 0, val rendererLoads: Int = 0,
-    val causalAttribution: String = "NOT_ESTABLISHED", val goal: Goal? = null, val target: Target? = null) {
+    val causalAttribution: String = "NOT_ESTABLISHED", val goal: Goal? = null, val target: Target? = null,
+    /** Bu turda birlikte değerlendirilen hedefler; ilki [target] (odak). */
+    val targets: List<Target> = emptyList(),
+    /** Hedef başına son sonuçlar (tur dışında da yaşar). */
+    val results: Map<String, TargetResult> = emptyMap(),
+    /** Odak hedefin aday uygulanmadan önceki doğrudan ağ yolu sonucu. */
+    val baselineOutcome: String = "UNKNOWN",
+    /** Sosyal Erişim'in motorda kalıcılaştırdığı (onaylanan) plan. */
+    val plan: PlanState = PlanState()) {
     fun feedback(outcome: String) = Feedback(sessionId, attemptId, operationId, contextGeneration, modeGeneration, UUID.randomUUID().toString(), version, outcome)
 }

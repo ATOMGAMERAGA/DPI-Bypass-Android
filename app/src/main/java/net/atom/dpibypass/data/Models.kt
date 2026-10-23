@@ -52,12 +52,17 @@ data class ActiveProfile(
     val strategyId: String,
     val strategyName: String,
     val ispName: String,
+    /** Bağlanırken ölçülen en yavaş hedefin TLS el sıkışması; uygulamanın ping'i değildir. */
     val latencyMs: Int?,
+    /** "x/y hedef" kapsama özeti; çözülemeyen zorunlu hedefler paydada kalır. */
+    val coverage: String? = null,
+    /** Motor tabanı Sosyal Erişim'de onaylanan planla değiştirildi mi? */
+    val socialPlan: Boolean = false,
 ) {
     fun shortLabel(): String = buildString {
         append(ispName)
         append(" · ")
         append(strategyId)
-        latencyMs?.let { append(" · ${it} ms") }
+        latencyMs?.let { append(" · TLS ${it} ms") }
     }
 }

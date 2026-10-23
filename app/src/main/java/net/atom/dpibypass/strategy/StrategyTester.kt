@@ -26,18 +26,45 @@ data class StrategyTestResult(
     val strategy: Strategy,
     val state: State = State.Pending,
     val successCount: Int = 0,
+    /** İstenen (zorunlu) hedef sayısı; DNS'te çözülemeyenler DAHİL. */
     val totalTargets: Int = 0,
+    /** Hedefler arasında EN YAVAŞ başarılı TLS el sıkışması (ms). Uygulamanın ping'i ya da hızı değildir. */
     val latencyMs: Long? = null,
+    /** DoH ile çözülemediği için ölçülemeyen zorunlu hedef sayısı. */
+    val unresolvedTargets: Int = 0,
 ) {
     enum class State { Pending, Testing, Success, Failed }
+
+    /** Bütün zorunlu hedefler ölçüldü ve geçti mi? Çözülemeyen hedef varken asla true değil. */
+    val fullCoverage: Boolean get() = totalTargets > 0 && successCount == totalTargets
+}
+
+/**
+ * Kazanan seçimi (saf, birim testli): önce KAPSAMA (kaç zorunlu hedef geçti), sonra
+ * en yavaş hedefin el sıkışması. Eskiden eşitlikte en HIZLI tek hedef kazandırıyordu;
+ * bu, bir uygulamada hızlı ama diğerinde ağır olan stratejiyi öne çıkarabiliyordu.
+ */
+object StrategyScore {
+    fun isBetter(candidate: StrategyTestResult, current: StrategyTestResult?): Boolean {
+        if (current == null) return true
+        if (candidate.successCount != current.successCount) return candidate.successCount > current.successCount
+        return (candidate.latencyMs ?: Long.MAX_VALUE) < (current.latencyMs ?: Long.MAX_VALUE)
+    }
+
+    /** "x/y hedef" — y zorunlu hedeflerin tamamı; çözülemeyenler paydadan düşmez. */
+    fun coverageLabel(r: StrategyTestResult): String = buildString {
+        append("${r.successCount}/${r.totalTargets} hedef")
+        if (r.unresolvedTargets > 0) append(" · ${r.unresolvedTargets} çözülemedi")
+    }
 }
 
 /**
  * Otomatik strateji test motoru — "her birini tek tek test ederek hangisinin
  * çalıştığını bul, ve gerçek interneti yavaşlatmadan en düşük ping'liyi seç".
  *
- * Puanlama: başarı (kaç hedef çalıştı) BİRİNCİL, gecikme (ping) İKİNCİL.
- * Böylece hem "çalışsın" hem "ping artmasın" gereksinimi karşılanır.
+ * Puanlama: kapsama (kaç zorunlu hedef çalıştı) BİRİNCİL, en yavaş hedefin TLS
+ * el sıkışma süresi İKİNCİL (bkz. [StrategyScore]). Ölçülen süre uygulamanın
+ * gerçek ping'i ya da bant genişliği değildir; yalnızca karşılaştırma içindir.
  *
  * ---------------------------------------------------------------------------
  * NEDEN ESKİDEN HEP P1 SEÇİLİYORDU
@@ -86,6 +113,8 @@ class StrategyTester(
         }
 
         val resolved = resolve(blockedHosts)
+        val unresolved = blockedHosts.distinct().size - resolved.size
+        _results.value = _results.value.map { it.copy(totalTargets = blockedHosts.distinct().size, unresolvedTargets = unresolved) }
         if (resolved.isEmpty()) {
             Log.w(TAG, "Hiçbir hedef DoH ile çözülemedi — test iptal")
             return@withContext null
@@ -98,6 +127,7 @@ class StrategyTester(
             updateResult(index) { it.copy(state = StrategyTestResult.State.Testing) }
 
             val result = testOne(strategy, resolved, timeoutMs)
+                .copy(totalTargets = blockedHosts.distinct().size, unresolvedTargets = unresolved)
             updateResult(index) {
                 it.copy(
                     state = if (result.successCount > 0) StrategyTestResult.State.Success
@@ -107,7 +137,7 @@ class StrategyTester(
                 )
             }
 
-            if (result.successCount > 0 && isBetter(result, best)) {
+            if (result.successCount > 0 && StrategyScore.isBetter(result, best)) {
                 best = result.copy(strategy = strategy)
             }
 
@@ -119,13 +149,20 @@ class StrategyTester(
             }
         }
 
+        lastBest = best
         best?.let { it.strategy to it.latencyMs }
     }
 
+    /** Son [run]'ın kazananının kapsama bilgisi (UI ve bağlantı profili için). */
+    @Volatile var lastBest: StrategyTestResult? = null
+        private set
+
     /**
-     * Tek bir stratejiyi doğrular: TÜM hedeflerde çalışıyorsa gecikmesini, aksi
-     * hâlde null döner. Bağlanmanın hızlı yolu budur — hatırlanan kazanan hâlâ
-     * iş görüyorsa yarışa hiç girilmez.
+     * Tek bir stratejiyi doğrular: çözülebilen TÜM hedeflerde çalışıyorsa
+     * gecikmesini, aksi hâlde null döner. Bağlanmanın hızlı yolu budur —
+     * hatırlanan kazanan hâlâ iş görüyorsa yarışa hiç girilmez. DNS'te çözülemeyen
+     * bir hedefi hiçbir DPI stratejisi düzeltemeyeceği için yarış tetiklenmez, ama
+     * sonuç [lastBest] üzerinden "tam kapsama değil" diye raporlanır.
      */
     suspend fun verify(
         strategy: Strategy,
@@ -135,6 +172,8 @@ class StrategyTester(
         val resolved = resolve(blockedHosts)
         if (resolved.isEmpty()) return@withContext null
         val result = testOne(strategy, resolved, timeoutMs)
+            .copy(totalTargets = blockedHosts.distinct().size, unresolvedTargets = blockedHosts.distinct().size - resolved.size)
+        lastBest = result
         if (result.successCount >= resolved.size) result.latencyMs else null
     }
 
@@ -143,7 +182,7 @@ class StrategyTester(
      * çözümdeki gecikme toplanmaz, en yavaş sorgu kadar sürer.
      */
     private suspend fun resolve(hosts: List<String>): Map<String, String> = coroutineScope {
-        hosts.map { host ->
+        hosts.distinct().map { host ->
             async(Dispatchers.IO) {
                 val ip = doh.resolve(host).firstOrNull()
                 if (ip == null) {
@@ -152,17 +191,6 @@ class StrategyTester(
                 } else host to ip
             }
         }.awaitAll().filterNotNull().toMap()
-    }
-
-    /** Başarı birincil, gecikme ikincil kıyaslama. */
-    private fun isBetter(candidate: StrategyTestResult, current: StrategyTestResult?): Boolean {
-        if (current == null) return true
-        if (candidate.successCount != current.successCount) {
-            return candidate.successCount > current.successCount
-        }
-        val cLat = candidate.latencyMs ?: Long.MAX_VALUE
-        val curLat = current.latencyMs ?: Long.MAX_VALUE
-        return cLat < curLat
     }
 
     private suspend fun testOne(
@@ -200,7 +228,7 @@ class StrategyTester(
                 state = if (success > 0) StrategyTestResult.State.Success else StrategyTestResult.State.Failed,
                 successCount = success,
                 totalTargets = resolved.size,
-                latencyMs = latencies.minOrNull(),
+                latencyMs = latencies.maxOrNull(),
             )
         } catch (e: Exception) {
             Log.d(TAG, "${strategy.id} test hatası: ${e.message}")
