@@ -94,7 +94,8 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
             .put("appVersion", net.atom.dpibypass.BuildConfig.VERSION_NAME)
             .put("catalogVersion", SocialPlatform.CATALOG_VERSION).put("evaluatorVersion", GoalEvaluator.VERSION)
             .put("androidSdk", Build.VERSION.SDK_INT).put("networkTransport", SocialAccessRuntime.transportLabel())
-            .put("planStrategyId", results.second ?: "").put("results", masked).put("entries", entries).toString(2)
+            .put("planStrategyId", results.second ?: "").put("results", masked).put("entries", entries)
+            .put("accessRoutes", AccessRoutes.diagnostic(SocialAccessRuntime.routes.ledger.value, System.currentTimeMillis())).toString(2)
     }
     // Yalnızca yanlış-pozitif düzeltmesinde gerekir; açılışta ana iş parçacığında
     // dosya oluşturup fsync etmesin diye tembel.
@@ -119,6 +120,8 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
         if (rendererOwner == operation) { rendererOwner = null; releaseRenderer = null }
     }
     var target: Target? = null
+    /** Resmî web yolu için kullanıcının seçtiği tarayıcı paketi (null: varsayılan). */
+    @Volatile var browserPackage: String? = null
     override fun available() = engine != null
     override fun networkUsable(): Boolean = SocialAccessRuntime.networkUsable()
     override suspend fun apply(candidate: CandidateDefinition, operationId: String) {
@@ -127,7 +130,9 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
         } else if (candidate.surface == "OFFICIAL_WEB") {
             val t = checkNotNull(target)
             // Only a fixed, canonical HTTPS target can reach this intent. Browser closure is not owned.
-            app.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(t.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            // Niyet bir tarayıcı paketine hedeflenir: App Links web denemesini native uygulamaya çeviremez.
+            val result = AccessLauncher.openInBrowser(app, AccessLauncher.effectiveBrowser(app, browserPackage), t.url)
+            check(result == AccessLauncher.LaunchResult.OPENED) { "Browser unavailable: $result" }
         }
     }
     override suspend fun rollback(operationId: String): Boolean {
@@ -249,6 +254,9 @@ object SocialAccessRuntime {
     private var initialized = false
     lateinit var adapter: AndroidTrialAdapter; private set
     lateinit var coordinator: ExperimentCoordinator; private set
+    lateinit var routes: AccessRouteStore; private set
+    /** Bu uygulama sürecinin rastgele kimliği; erişim yolu kayıtları süreç değişince bayatlar. */
+    val processId: String = java.util.UUID.randomUUID().toString()
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var cm: ConnectivityManager? = null
     private val tracker = NetworkContextTracker()
@@ -259,6 +267,8 @@ object SocialAccessRuntime {
         if (initialized) return
         val app = context.applicationContext
         adapter = AndroidTrialAdapter(app, AlphaJournal(app))
+        routes = AccessRouteStore(app)
+        scope.launch { routes.load() }
         // Native engine and owned renderer are process scoped: after process death none survives.
         // Validate rather than replay a prior success or restore Alpha arguments automatically.
         val recovered = runCatching {
@@ -324,6 +334,25 @@ object SocialAccessRuntime {
     suspend fun vpnStopped() { if (initialized) withContext(Dispatchers.IO) { coordinator.engineStopped(); adapter.engine = null } }
     suspend fun engineStarted(strategyId: String?) { if (initialized) withContext(Dispatchers.IO) { coordinator.engineStarted(strategyId) } }
     suspend fun settingsChanging() { if (initialized) withContext(Dispatchers.IO) { coordinator.contextChanged() } }
+
+    /**
+     * Kullanıcının erişim yolu bildirimi. Bildirimle AYNI ANDA, o yüzeyin gerçek
+     * güzergâhından (paket tünelde ve motor açıksa yerel SOCKS, değilse doğrudan)
+     * platformun kontrol adresine tek bir ağ yolu ölçümü yapılır; böylece doğrulama
+     * ekranının ağ sorunundan mı sunucu şartından mı geldiği ayrılır. Hız sınırı
+     * beklemesindeki hedefe istek atılmaz (NOT_MEASURED).
+     */
+    suspend fun recordRoute(platform: SocialPlatform, action: AccessAction, surface: AccessSurface, browser: String?, account: AccountContext,
+        outcome: RouteOutcome, freshStart: Boolean, surfaceInTunnel: Boolean, context: RouteContext): RouteRejection? = withContext(Dispatchers.IO) {
+        val through = surfaceInTunnel && adapter.available()
+        val home = Target.home(platform.id)
+        val evidence = if (home == null || adapter.cooldownRemainingMillis(home.key) > 0 || !networkUsable()) null
+            else withTimeoutOrNull(20_000) { runCatching { adapter.probe(home, through) }.getOrNull() }
+        evidence?.takeIf { it.retryAfterSeconds > 0 }?.let { e -> home?.let { runCatching { adapter.persistCooldown(it.key, e.retryAfterSeconds * 1000) } } }
+        val network = when (evidence?.technicalOutcome) { null -> "NOT_MEASURED"; "PASS" -> "PASS"; "FAIL" -> "FAIL"; else -> "UNKNOWN" }
+        routes.accept(RouteReport(platform.id, action, surface, browser, account, outcome, context, if (through) "TUNNEL" else "DIRECT",
+            network, evidence?.failureClass.orEmpty(), freshStart, System.currentTimeMillis()), context, System.currentTimeMillis())
+    }
 
     /** Seçili platformların strateji doğrulamasında denenecek alan adları. */
     fun probeHosts(platforms: Set<String>): List<String> =

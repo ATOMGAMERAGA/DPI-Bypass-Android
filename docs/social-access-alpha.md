@@ -1,6 +1,175 @@
 # Sosyal Erişim Deneyleri — Alpha (Android)
 
-> **Güncel davranış: 23 Ekim 2026 revizyonu aşağıdadır.** Daha eski bölümler tarihsel kayıttır; çeliştikleri yerde bu revizyon geçerlidir (özellikle: N4 profilleri artık otomatik kipte ağ yolu üzerinden değerlendirilir; onaylanan profil ayar/ağ değişikliğinde ve başka hedefin denemesinde geri alınmaz).
+> **Güncel davranış: 26 Ekim 2026 revizyonu aşağıdadır.** Daha eski bölümler (23, 22, 18, 17 Ekim) tarihsel kayıttır; çeliştikleri yerde bu revizyon geçerlidir. Bu revizyonda da **gerçek cihaz/operatör doğrulaması yoktur** (bkz. "Ana hedef değerlendirmesi").
+
+## Revizyon — 26 Ekim 2026 (temel: `5488ab9`, v2.4.1)
+
+### 1. Kaynak araştırması: yaş doğrulama yönetmeliği
+
+Bu tarihte okunan resmî metin:
+
+| Kaynak | Yayım | Doğrudan doğrulanan |
+|---|---|---|
+| [Resmî Gazete 10.10.2026, sayı 33396 — fihrist](https://www.resmigazete.gov.tr/eskiler/2026/10/20261010.htm) ve [yönetmelik PDF'i](https://www.resmigazete.gov.tr/eskiler/2026/10/20261010-15.pdf) | 10 Ekim 2026 | "Sosyal Ağ Sağlayıcı Tarafından Çocuklara Özgü Ayrıştırılmış Hizmet Sunulmasına ve Yaş Doğrulamaya İlişkin Yönetmelik", Cumhurbaşkanlığı (Siber Güvenlik Başkanlığı). Dayanak: 5651 s. Kanun ek 4. madde 7/20/25. fıkralar (Madde 3). Kapsam: Türkiye'den erişilebilen yurt içi/yurt dışı sosyal ağ sağlayıcılar **ve kullanıcılar** (Madde 2). 15 yaşını doldurmamışlara hizmet sunulamaz (Madde 5/1). Hesap oluşturma aşamasında yaş doğrulama belirteci zorunlu (Madde 6/2); makul şüphede hesap askıya alınıp yeniden doğrulama istenir (Madde 6/3). Doğrulama e-Devlet Kapısı üzerinden; belirteç kullanıcı tarafından platforma yüklenir, yalnız 15/18 eşiğini içerir (Madde 7/a–ç). Türkiye'de mukim olmayıp geçici bulunanlar muaf; pasaportla istisnai belirteç (Madde 7/d). Mevcut hesaplar **31/3/2027'ye kadar** en az bir kez doğrulanmalı (Geçici Madde 1). Yürürlük **1/11/2026** (Madde 13). |
+| Meta/Instagram yardım merkezi (arama) | — | Türkiye'ye özgü e-Devlet belirteci uygulamasını anlatan resmî platform belgesi **bulunamadı**. Platformların hangi gün, hangi istemcide (uygulama/web), hangi akışta uygulayacağı **doğrulanmadı**. |
+| Haberler (Diken, BirGün, bianet, biometricupdate vb.) | Ekim 2026 | Yalnız ipucu; yukarıdaki maddeler resmî metinden okundu. |
+
+Sonuçlar (yalnız metnin söylediği):
+- Yönetmelik VPN, IP ya da erişim yolundan söz etmez; "Türkiye'den erişilebilen … kullanıcılar"ı kapsar. Platformun kullanıcının Türkiye'de olduğunu nasıl belirleyeceği metinde yoktur — **varsayılmadı**.
+- Bu uygulama yerel bir VpnService kullanır: trafik cihazdan çıkmadan yeniden düzenlenir, IP adresi ve ülke değişmez. Uzak VPN, ülke değiştirme, kimlik/belirteç taklidi bu revizyonda da **dışlanmıştır**.
+- Doğrulama kaydı platformun sunucusunda tutulur (belirteç platforma yüklenir, sağlayıcı teyit eder). Yerel DNS/DPI işlemleri bu kaydı **değiştiremez**.
+- Mevcut hesaplar için 31/3/2027'ye kadar süre vardır: 1 Kasım'dan sonra bir hesabın açılmaya devam etmesi bu uygulamanın etkisi değil, geçiş süresi olabilir (Hipotez 3).
+
+### 2. Kanıt tablosu
+
+Kanıt: **T** = önce kırmızı düşen JVM testi (5488ab9'da kırmızı, bu sürümde yeşil); **S** = yerel TLS test sunucusu (MockWebServer + kendi test CA'mız); **C** = gerçek cihaz (**yok**).
+
+| Belirti | Yeniden üretim | Dosya / sembol | Kök neden | Düzeltme | Test |
+|---|---|---|---|---|---|
+| Gözlemcinin bildirdiği yaş/giriş/bot sınıfı kayboluyor | JSON `blockingClass=AGE_OR_ID_VERIFICATION_REQUIRED` | `SocialModels.kt` `Observation.fromJson` | Değer yapıcıya aktarılmıyordu (varsayılan UNKNOWN) | Bilinen sınıflar korunur, bilinmeyen UNKNOWN kalır (`Observation.blockingClass`); WebView yolu da aynı süzgeçten geçer | T `BudgetAndWaitRegressionTest.observationJsonKeepsKnownBlockingClassAndRejectsUnknown` |
+| Odak dışı hedef 429 verince arama sürüyor | Başlangıçta / aday altında Instagram `Retry-After` | `ExperimentCoordinator.runRound` | Yalnız odak hedefin `retryAfterSeconds`'ı okunuyordu | Her ölçüm (`measure`) Retry-After'da hedefe özel bekleme yazar; tur `pauseForCooldown` ile durur, geçici aday geri alınır, sonraki profil denenmez; `start` seçili herhangi bir hedef beklemedeyse başlamaz | T `secondaryTargetRetryAfterAtBaselineStopsSearch`, `…UnderCandidateRollsBackAndStops` |
+| Kararlılık ölçümündeki bekleme isteği "kararsız" sayılıp sonraki profile geçiliyor | 2. ölçümde 429 | `confirmStable`, `applyAndConfirmBest` | Boolean dönüş: bekleme = başarısızlık | `Stability {STABLE, UNSTABLE, WAIT, BUDGET}`; WAIT turu durdurur | T `stabilityMeasurementRetryAfterIsNotTreatedAsFailure` |
+| HEAD→GET iki istek tek sayılıyor | HEAD 405 | `measure` / `NetworkEvidence.requests` | Ölçüm başına sabit +1 | Her istekten önce 2 istek + 256 KiB rezerv; sonra gerçek değer; zaman aşımında rezerv harcanmış sayılır | T `headThenGetCountsBothRequests`; S `HttpPathProbeTest.headNotAllowedFallsBackToSingleRangedGet` |
+| Eski içerik onayı yeni bağlamda "Çalışıyor" görünüyor | RESOLVED → bağlam değişimi → yeniden doğrulama | `reverify` (`sameEvidence`) | Yeni ağ PASS'i eski kullanıcı onayını güncel sonuca kopyalıyordu | `TargetResult.contentGeneration` / `contentCurrent`; yeniden doğrulama ve "Seçilileri kontrol et" eski onayı yalnız geçmiş olarak taşır | T `reverifyCannotResurrectPreviousContentConfirmation`, `ReportOutcomeTest.networkCheckCannotRefreshUserReport` |
+| Çok hedefte arama başlamadan "bütçe doldu" | Bütün katalog (12 hedef) | `runRound` toplu bayt rezervi (`262 144 × hedef × 2`) + başarısız denemenin 256 KiB sayılması | 24 × 256 KiB = 6 MiB > 5 MiB: ilk adaydan önce durma | Toplu rezerv kaldırıldı; istek başı denetim; başarısız deneme 16 KiB tahmini (`HttpPathProbe.FAILED_ATTEMPT_BYTES`); tavan `24 + 10×(n−1)`, en çok 120 gerçek istek; bütçe aday ortasında biterse aday başarısız sayılmaz, kuyruğa döner | T `allCatalogTargetsFindCommonPlanWithinBudget`, `budgetExhaustedMidCandidateIsNotAFailureAndResumes`; `eightTargetsFindCommonPlanAtLastCandidate` her iki sürümde yeşil (koruma testi) |
+| Güvenilmeyen sertifika "SNI/DPI müdahalesi" diye gösteriliyor | İstemcinin güvenmediği CA | `ProbeClassifier.fromException` | `SSLHandshakeException` tek sınıfa düşüyordu | Neden zincirinde `CertificateException`/`CertPathValidatorException` → `TLS_CERT_UNTRUSTED` (giriş portalı/araya giren sayfa/saat) | S `untrustedCertificateIsNotReportedAsDpi` (eski satırla kırmızı doğrulandı) |
+| Resmî web denemesi native uygulamada açılabiliyor | A1 / "Hedefi aç" | `AndroidTrialAdapter.apply`, `SocialAccessScreen.openUrl` | Hedefsiz `ACTION_VIEW`: App Links bağlantıyı native uygulamaya verebilir | Niyet seçilen ya da varsayılan **tarayıcı paketine** hedeflenir (`AccessLauncher.openInBrowser`); uygulama düğmesi resmî pakete | Statik (C yok) |
+
+5488ab9 üzerinde yeni regresyon dosyasının sonucu: **9 testten 8'i FAIL** (beklenen), bu sürümde 9/9 PASS.
+
+### 3. Mekanizma hipotezleri (deney kartları)
+
+Gerçek bir doğrulama engeli bu ortamda **gözlenemedi** (cihaz, hesap, Türkiye ağı yok; yönetmelik henüz yürürlükte değil). Bu yüzden üç kartın da saha sonucu **FIELD_UNVERIFIED / NOT_TESTED**'dır; aşağıdaki "sonuç" alanı yalnız ölçüm mantığının durumudur.
+
+**H1 — İstemci/akış farkı (uygulama ↔ resmî web)**
+- Gözlenen engel: yok (saha). Hedef işlem: Instagram, kendi hesabınla akış/profil (ACCOUNT_ACCESS).
+- Kontrol edilen değişken: yalnız yüzey (resmî uygulama paketi ↔ açıkça seçilen tarayıcı). Değişmeyen: hesap, ağ, motor profili, DNS/QUIC/kapsam, uygulama süreci.
+- Mekanizma: platform doğrulamayı yüzeylere farklı zamanda uygularsa, güncel kanıtı olan yüzey işlem bazında seçilir. Destekleyen bulgu: yönetmelik uygulama akışını platforma bırakıyor (Madde 6/3, 12). Çürüten olası bulgu: iki yüzey de aynı hesapta doğrulama istiyorsa (sunucu tarafı hesap durumu) fark yoktur.
+- Önce/sonra: aynı işlem, iki yüzey, aynı bağlam; en az **iki ayrı zamanda** (≥10 dk) ve en az biri uygulama yeniden başlatılıp yeni içerikle.
+- Sunucunun kabulü: kullanıcı kendi hesabıyla işlemin gerçekten yapıldığını teyit eder ("Kendi hesabımla açıktı"); ekranın kaybolması yetmez. Mesaj/paylaşım testini kullanıcı yapar.
+- Yanlış pozitif: açık oturum/önbellek (→ yeniden başlatma şartı), girişsiz içerik (→ ayrı hesap bağlamı), geçiş süresi (→ H3). Yan etki yok; geri alma: kayıt silinebilir.
+- Sonuç: **NOT_TESTED (saha)**; kayıt/karar mantığı JVM'de sınandı (`AccessRoutesTest`).
+
+**H2 — Ağ sorununun doğrulama sorunu sanılması**
+- Hedef işlem: aynı. Kontrol edilen değişken: ağ yolu (ortak plan araması); değişmeyen: yüzey ve hesap.
+- Mekanizma: gerekli bir uç noktaya bağlantı kesildiğinde uygulama doğrulama/yükleme döngüsü gösterebilir. "Doğrulama istiyor" bildirildiği **anda**, o yüzeyin gerçek güzergâhından (paket tünelde ise yerel SOCKS, değilse doğrudan) platformun kontrol adresine tek bir ölçüm yapılır: ağ kapalıysa `NETWORK_PROBLEM_SUSPECTED` (önce ağı düzelt, sonra aynı işlemi tekrar dene), açıksa `SERVER_REQUIREMENT_NETWORK_OPEN`.
+- Sınır: tek kontrol adresi platformun bütün API/CDN uç noktalarını kapsamaz; açık ağ yolu "bütün servisler çalışıyor" demek değildir.
+- Sonuç: sınıflandırma **JVM'de SUPPORTED (mantık)**, saha **NOT_TESTED**.
+
+**H3 — Oturum/önbellek/geçiş dönemi etkisi**
+- Kontrol edilen: kullanıcı beyanı "hesap 1 Kasım 2026'dan önce/sonra açıldı" (hesap kimliği saklanmaz), uygulamanın yeniden başlatılması, ayrı zamanlarda tekrar, süreç kimliği.
+- Mekanizma: 1/11/2026–31/3/2027 arasında mevcut hesabın açılması geçiş süresinden olabilir; uygulama bunu "yöntem başarısı" diye yazmaz, notla gösterir. Hesaptan çıkış, oturum temizliği, yeni hesap açma **yapılmaz**.
+- Sonuç: **JVM'de SUPPORTED (mantık)**, saha **NOT_TESTED**.
+
+Elenen açıklamalar (deneme yapılmadan, gerekçeyle): DNS/DPI ile doğrulama kaydını değiştirmek (sunucu tarafı; metin belirteci platforma yükletir); doğrulama uç noktasını engellemek / ekranı gizlemek / istemci bayrağı yazmak (sunucu kabulünü kanıtlamaz, ayrıca hizmet şartlarına aykırı olabilir); kullanıcı aracısı veya çerez değiştirmek (gizli istemci değişikliği; yasak); uzak VPN/ülke değiştirme (görev dışı).
+
+### 4. Ürünleşen mekanizma: işlem bazında doğrulanmış erişim yolu
+
+Sosyal Erişim → **Erişim yolu** kartı (odak platform için):
+1. İşlev seç: İçerik görüntüleme · Video/medya · Hesabıma erişim · Mesajlaşma · Paylaşım · Sesli görüşme (platformun desteklediği kadarı).
+2. **Uygulamada aç** (niyet resmî pakete) ya da **Tarayıcıda aç** (niyet açıkça seçilen tarayıcı paketine; App Links native'e çeviremez). Açılış anındaki bağlam saklanır.
+3. Dönüşte: **Çalışıyor / Kısmen / Çalışmıyor / Doğrulama istiyor / Emin değilim**, hesap bağlamı (kendi hesabım / oturum açık değildi / emin değilim), "yeniden başlattım ve yeni içerik denedim".
+4. Kayıt, ağ (taşıyıcı + ISS ailesi), profil (motorun stratejisi, plan, DNS, QUIC, kapsam, Vodafone, bağlam kuşağı) ve süreç kimliğine bağlanır; bildirim anında tek ağ ölçümü eklenir. Ağ/profil/süreç değişirse kayıt "yeniden kontrol gerekiyor" olur; başka platform için profil değişse bile (motor ortak) bütün kayıtlar bayatlar.
+5. Karar: **Doğrulanmış yol** yalnız aynı bağlamda ≥2 ayrı zamanda (≥10 dk) "Çalışıyor" + en az biri yeniden başlatmalı + hesap işlevinde "kendi hesabımla" teyidiyle. Son bildirim kazanır. Tek onay "tek onay" kalır. Bütün denenen yüzeyler ağ açıkken doğrulama istiyorsa **"Platform doğrulama istiyor"** — yüzey değiştirmek bunu çözmez denir.
+6. **Bu yolla aç** düğmesi güncel kanıtı olan yüzeyi tek dokunuşla açar.
+
+Ne DEĞİLDİR: aşma yöntemi değildir; kullanıcı aracısı, çerez, hesap verisi değiştirmez/taşımaz; doğrulama ekranını gizlemez; kullanıcı bildirimi otomatik kanıt gibi kaydedilmez. Tam kullanım için yalnız bu yönlendirme **yeterli değildir** ve bir yüzeyin işe yaradığı sahada gösterilmedi.
+
+Kalıcılık: `noBackupFilesDir/social-access-routes.json` (sürüm 1, en çok 200 kayıt, 30 gün). Bu sürümün okuyamadığı/bozuk dosya **ezilmeden** `social-access-routes.unreadable.json` olarak yedeklenir. Eski arayüz sürümünden gelen bildirim (`UI_VERSION`) ve açıldıktan sonra bağlamı değişmiş bildirim reddedilir. Tanılama çıktısında bağlantı, süreç kimliği, tarayıcı paketi ve ISS adı yoktur (yalnız taşıyıcı türü).
+
+### 5. Destek matrisi (bu revizyon)
+
+"Oto" = kodla ölçülür; "Bildirim" = kullanıcı bildirimiyle, bağlam ve zamanla; "—" = yok. **Hiçbir hücre gerçek cihaz/operatörde doğrulanmadı.**
+
+| Platform | Ağ yolu | İçerik | Medya | Hesap erişimi / doğrulama | Mesaj · Paylaşım | Ses | Erişim yolu kartı |
+|---|---|---|---|---|---|---|---|
+| Instagram | Oto | Oto (yalnız herkese açık gönderi, test penceresi, doğrudan yol) / Bildirim | Bildirim | Bildirim (+ doğrulama anı ağ ölçümü) | Bildirim | — | Uygulama + web |
+| YouTube | Oto | Oto (test penceresi) / Bildirim | Oto (test penceresi) / Bildirim | Bildirim | Paylaşım: Bildirim | — | Uygulama + web |
+| X, TikTok, Facebook, Reddit | Oto | Bildirim | Bildirim | Bildirim | Bildirim | — | Uygulama + web |
+| Discord | Oto (discord.com; bağlanırken gateway/cdn) | Bildirim | — | Bildirim | Bildirim | Bildirim (QUIC/UDP engeli açıkken "kapalı") | Uygulama + web |
+| Telegram, WhatsApp, Signal | Oto (web/servis uç noktası) | — | — | Bildirim | Mesaj: Bildirim | Bildirim | Uygulama + web |
+| Twitch | Oto | Bildirim | Bildirim | Bildirim | Paylaşım: Bildirim | — | Uygulama + web |
+| Snapchat | Oto | — | — | Bildirim | Bildirim | — | Uygulama + web |
+| Özel alan adı | Oto | Bildirim | — | — | — | — | — |
+
+### 6. Tünel yolu kanıt düzeyleri
+
+| Düzey | Bu revizyonda |
+|---|---|
+| Doğrudan kontrol (uygulamanın kendi süreci, tünel dışı) | Kod + yerel TLS sunucusu (S) |
+| Yerel SOCKS (motorun o anki planı) | Kod; JVM'de taklit motor. Gerçek ByeDPI/SOCKS yolu bu ortamda çalıştırılmadı |
+| Gerçek TUN üzerinden test istemcisi | **Yok** (ayrı UID'li test istemcisi eklenmedi; mevcut tüneli kapatacak ikinci VPN açılmadı) |
+| Kullanıcı tarafından native uygulamada doğrulama | Bildirim altyapısı var; `routePath` paketin bildirim anında tünelde olup olmadığını kaydeder. **Saha yok** |
+
+`routeProvenance` hiçbir yerde sabit "doğrulandı" ile doldurulmaz; WebView gözlemi yine yalnız doğrudan yoldur ve N4 adayına kredi yazamaz.
+
+### 7. Kabul senaryoları → kanıt
+
+| # | Senaryo | Nerede | Durum |
+|---|---|---|---|
+| 1 | 200/giriş duvarı → yalnız ağ | S `loginWall200IsNetworkPathOnly`; JS gözlemci testleri | PASS |
+| 2 | Sunucu yaş/kimlik doğrulaması | T `verificationRequiredAfterAutoNetworkPassDoesNotRotateProfiles`, `verificationRequiredDuringManualTrialStopsSearch`; `AccessRoutesTest.allSurfacesGatedIsReportedHonestly` | PASS (JVM) |
+| 3 | Ağ bozuk, aday iyileştiriyor | `SocialRegressionTest.automaticModeEvaluatesNativeCandidateOnItsRealPath`, `MultiTargetTest` | PASS (JVM, taklit motor) |
+| 4 | Başlangıçta çalışıyor | `alreadyReachableTargetGivesNoMethodCredit`, `alreadyWorkingTargetGetsNoMethodCreditFromUserReport` | PASS |
+| 5 | A'yı bozan aday | `candidateThatBreaksAWorkingAppIsRejectedAndCommonPlanIsKept` | PASS |
+| 6 | Kısmi ortak plan | `noCommonPlanKeepsBestPartialOnlyAfterSecondMeasurement` | PASS |
+| 7 | Ayar değişimi / ikinci test / soğuk açılış | `keptNativeMethodSurvivesTunnelSettingsChange`, `testingSecondPlatformDoesNotRevertFirstPlatformsKeptMethod`, `SettingsRepositoryTest`, R5 testi | PASS (JVM); Activity yeniden oluşturma cihazda yok |
+| 8 | İptal / gecikmiş callback | `cancellationDuringProbeRollsBackAndIsNotACandidateFailure`, eski kuşak testleri | PASS |
+| 9 | Wi-Fi/mobil geçişi | `settingsChangeKeepsPlanAndReverifiesOnceWithoutLoop`, `NetworkContextTracker` testleri; `profileNetworkOrProcessChangeMakesRecordsStale` | PASS (JVM); gerçek geçiş yok |
+| 10 | SOCKS başarılı, paket kapsam dışı | `TargetStatusRules` OUT_OF_SCOPE testi; Erişim yolu kartı `routePath=DIRECT` + uyarı | PASS (JVM) + statik |
+| 11 | WebView doğrudan yol başarılı, aday bozuk | `webViewObservationCannotCreditANativeCandidate` | PASS |
+| 12 | 429/5xx, DNS, sertifika, giriş portalı | `HttpPathProbeTest` (9), R2/R3 testleri | PASS (S) |
+| 13 | UDP/QUIC değişimi → ses | Arayüz ses satırı; otomatik gözlem yok | Yalnız statik; cihazda yapılmalı |
+| 14 | Bozuk ayar / journal | `corruptSettingsFileIsReportedNotSilentlyDefaulted`, `jsonRoundTripAndFutureSchemaIsNotOverwritten`, `malformedOrUnknownValuesAreDroppedNotPromoted` | PASS |
+| 15 | IPv4/IPv6, boş include | `emptyOrRemovedIncludeListNeverBecomesAllTraffic` | PASS; IPv6/NAT64 cihazda yok |
+| 16 | Tanılama maskeli | `diagnosticExportIsMasked` | PASS |
+
+### 8. Ana hedef değerlendirmesi
+
+**NOT_DEMONSTRATED.** Bu revizyon: (a) ağ ölçümü ve arama döngüsündeki gerçek regresyonları önce kırmızı testle gösterip düzeltti, (b) doğrulama ekranının ağ sorunu mu sunucu şartı mı olduğunu ayıran ve işlem bazında çalışan resmî yüzeyi kaydeden/açan bir deney+ürün altyapısı ekledi. Hiçbir sosyal platformda yaş/kimlik doğrulamasının aşıldığı, hesabınla tam kullanımın sağlandığı ya da bir yüzeyin diğerinden farklı davrandığı **gösterilmedi** (cihaz, hesap ve Türkiye ağı yok; yönetmelik 1 Kasım'da yürürlüğe giriyor). Hesap doğrulama gereksinimi sunucu tarafındadır ve yerel DNS/DPI ile **çözülemez**; uygulama bunu gizlemez, "Platform doğrulama istiyor" olarak gösterir.
+
+### 9. S24 Ultra saha kontrol listesi (kullanıcı tarafından, kendi hesabınla)
+
+Önce: Ayarlar → Telefon hakkında → Yazılım bilgileri'nden One UI/Android sürümünü; Ayarlar → Uygulamalar → Android System WebView sürümünü; Instagram uygulama sürümünü not edin. Parola/kod paylaşmayın.
+
+1. Mobil veri (Vodafone), Wi-Fi kapalı. Bağlanın. Sosyal Erişim → Instagram seçili → **Seçilileri şimdi kontrol et**: satır durumunu not edin.
+2. **Erişim yolu** → "Hesabıma erişim" → **Uygulamada aç**. Akışınız kendi hesabınızla yükleniyor mu? Dönün → sonucu + "Kendi hesabımla açıktı" seçin → Kaydet.
+3. Aynı işlem → **Tarayıcıda aç** (tarayıcıyı kendiniz seçin). Aynı şekilde kaydedin. Doğrulama ekranı görürseniz "Doğrulama istiyor" seçin; kart ağın o an açık mı kapalı mı olduğunu yazar.
+4. Doğrulama + "ağ kapalıydı" çıkarsa: **Ortak yöntem ara** ile planı bulun, sonra 2–3'ü tekrarlayın.
+5. 10+ dakika sonra uygulamayı son uygulamalardan kapatıp yeniden açın, **yeni** bir gönderi açın; 2–3'ü "yeniden başlattım" işaretiyle tekrarlayın. Kart "Doğrulanmış yol" demeli ya da çalışmayanı göstermeli.
+6. Mesaj gönderme/paylaşımı **kendiniz** deneyin ve "Mesajlaşma"/"Paylaşım" işlevinde ayrıca kaydedin.
+7. Wi-Fi'a geçin: kayıtlar "Ağ değişti, yeniden kontrol gerekiyor" olmalı; döngü olmamalı. 2–3'ü Wi-Fi'da tekrarlayın.
+8. "Bu hesap ne zaman açıldı?" sorusunu yanıtlayın; 1 Kasım–31 Mart arası notu not edin.
+9. Ekranı kilitleyin/arka plana alın, DNS ayarını değiştirin, uygulamayı yeniden başlatın: tercihler ve plan korunmalı, eski sonuç güncel gösterilmemeli.
+10. Discord'da sesli kanal ve YouTube'da video ilerlemesini ayrıca kontrol edin.
+11. Tanılama → önizle → dosyaya kaydedin. Paylaşmadan önce içinde bağlantı/hesap olmadığını kontrol edin.
+
+Sonuçları tarih, ağ (Vodafone/ev Wi-Fi), uygulama sürümü ile kaydedin; bir ağdaki sonucu bütün Türkiye'ye genellemeyin.
+
+### 10. Doğrulama kaydı — 26 Ekim 2026
+
+Linux bulut konteyneri, OpenJDK 21.0.12, Gradle 8.9 (wrapper), Android SDK 35, build-tools 35.0.0, NDK 26.3.11579264, CMake 3.22.1, Node 22.22. Fiziksel cihaz veya emülatör **yoktu**; S24 Ultra'da test **yapılmadı**, Android/WebView sürümü cihazdan okunamadı.
+
+- Temel (`5488ab9`, değişiklik öncesi): `./gradlew testDebugUnitTest` → 102/102 PASS.
+- `BudgetAndWaitRegressionTest` değişiklik öncesi koda karşı: **8/9 FAIL** (beklenen; 8 hedefli koruma testi iki sürümde de yeşil). `HttpPathProbeTest.untrustedCertificateIsNotReportedAsDpi` eski sınıflandırma satırıyla FAIL (`TLS_HANDSHAKE_FAILED`).
+- Son durum: `./gradlew testDebugUnitTest lintDebug assembleDebug` → **BUILD SUCCESSFUL**; **140/140 JVM testi PASS**, 0 atlanan (38 yeni: `BudgetAndWaitRegressionTest` 9, `HttpPathProbeTest` 9, `AccessRoutesTest` 15, `ReportOutcomeTest` 5).
+- `node --test tests/observer.test.cjs` → **8/8 PASS**.
+- `lintDebug`: 2 hata + 25 uyarı. İki hata da bu değişiklikten önce vardı ve dokunulmayan dosyalardadır (`tile/DpiTileService.kt:100` WrongConstant, `ui/apps/AppsScreen.kt:393` ProduceStateDoesNotAssignValue).
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, `net.atom.dpibypass.debug` 2.4.1-debug (versionCode 20401), **Android Debug sertifikasıyla** imzalı (`apksigner verify` geçti; resmî/release imzası değildir, mevcut release kurulumunun üzerine kurulamaz — paket adı `.debug` sonekli olduğu için yan yana kurulur, veriler ayrıdır). `lib/arm64-v8a/libbyedpi.so` ve `libhev-socks5-tunnel.so` mevcut (ayrıca armeabi-v7a, x86_64).
+- Instrumentation/native/TUN testleri çalıştırılmadı (cihaz yok).
+
+### 11. Bilinen sınırlar (bu revizyonda değişmeyen)
+
+- Motor tekil; uygulama başına ayrı strateji yok (arayüzde de sunulmuyor).
+- Erişim yolu kartındaki ağ ölçümü platformun tek kontrol adresidir; bütün API/CDN uç noktalarını kapsamaz.
+- `probeHosts` her platform için ana alan adını (Discord'da gateway/cdn ek) içerir; uygulamaların bütün işlevleri için gereken uç noktaların tamamı **doğrulanmadı** (paylaşılan CDN'ler bilinçli olarak eklenmedi).
+- StrategyPool'da P2/P7 yakın varyantlardır (TTL 5/6 + `--auto=torst`); bayrakların hepsi sabitlenmiş ByeDPI v0.13 `main.c` seçenek tablosunda mevcuttur, yeni bayrak eklenmedi.
+- QUIC kapatma tüneldeki bütün UDP'yi etkiler (ses dahil); hedefe özel QUIC kontrolü mevcut motorla yok ve sessizce uygulanmıyor.
+- IPv6 (Vodafone modu dışında) tünel dışında; NAT64/IPv6-only ağ cihazda sınanmadı.
+- Gerçek TUN üzerinden ayrı UID'li test istemcisi yok.
+- Pil/veri etkisi ölçülmedi; erişim yolu bildirimi başına tek HEAD isteği yapılır, arka planda periyodik iş yoktur.
+
+> 23 Ekim 2026 revizyonu (aşağıda) tarihsel kayıttır. Değişenler: bütçe (artık 24 + 10×(n−1), en çok 120 gerçek istek; istek başı denetim), Retry-After tüm seçili hedeflerde turu durdurur, içerik onayı bağlam kuşağına bağlıdır.
 
 ## Revizyon — 23 Ekim 2026 (temel: `5d92f5e`)
 

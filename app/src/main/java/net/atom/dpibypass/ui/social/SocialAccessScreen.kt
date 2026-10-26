@@ -145,6 +145,8 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
     val state by SocialAccessRuntime.coordinator.state.collectAsStateWithLifecycle()
     val connection by viewModel.connectionState.collectAsStateWithLifecycle()
     val saveError by viewModel.saveError.collectAsStateWithLifecycle()
+    val network by viewModel.network.collectAsStateWithLifecycle()
+    val vpnProfile by net.atom.dpibypass.vpn.VpnState.profile.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -190,6 +192,22 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
     val mode = settings.socialAccessMode
     val needsMedia = playMedia || problem == "MEDIA_PATH_FAILURE"
     val engineConnected = connection == ConnectionState.Connected
+    // Erişim yolu bildiriminin bağlamı: ağ (taşıyıcı + ISS ailesi; SSID/IP yok), motorun
+    // gerçek profili + DNS/QUIC/kapsam ayarları + bağlam kuşağı, süreç. Herhangi biri
+    // değişince önceki bildirimler güncel sayılmaz. ISS çözülürken bildirim alınmaz.
+    val routeContext = if (network.resolving) null else net.atom.dpibypass.social.RouteContext(
+        networkKey = "${network.transport.name}:${network.isp?.family?.name ?: "unknown"}",
+        profileKey = listOf(
+            "gen=${state.contextGeneration}",
+            "engine=" + (if (engineConnected) vpnProfile?.strategyId ?: "?" else "off"),
+            "plan=" + (state.plan.strategyId?.takeIf { state.plan.installed } ?: "none"),
+            "dns=${settings.dohProvider.name}:${settings.customDohUrl.hashCode()}",
+            "quic=${settings.disableQuic}",
+            "scope=${settings.appFilterMode.name}:${settings.selectedApps.sorted().hashCode()}",
+            "vf=${settings.vodafoneUnlimitedMode}",
+        ).joinToString("|"),
+        processId = SocialAccessRuntime.processId,
+    )
     val installed = remember(selected) {
         selected.associate { p -> p.id to p.packages.filter { pkg -> runCatching { context.packageManager.getApplicationInfo(pkg, 0) }.isSuccess }.toSet() }
     }
@@ -360,6 +378,19 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
             }
         }
 
+        // ---- Erişim yolu (işlem bazında) ----
+        focus?.takeIf { it != SocialPlatform.CUSTOM }?.let { p ->
+            SectionHeader("Erişim yolu")
+            AccessRouteCard(
+                platform = p,
+                url = focusTarget?.url ?: p.homeUrl,
+                settings = settings,
+                routeContext = routeContext,
+                engineConnected = engineConnected,
+                onChooseBrowser = viewModel::setSocialBrowserPackage,
+            )
+        }
+
         // ---- Plan ----
         state.plan.strategyId?.let { planId ->
             SectionHeader("Etkin plan")
@@ -449,6 +480,7 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
                         val catalog = SocialAccessRuntime.catalog(goal, viewModel.socialIspFamily())
                         plannedMethods = catalog.size
                         SocialAccessRuntime.adapter.target = t
+                        SocialAccessRuntime.adapter.browserPackage = settings.socialBrowserPackage.ifBlank { null }
                         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered ?: true
                         val others = targets.filter { it.key != t.key }
                         SocialAccessRuntime.launch { start(goal, t, mode, baseline, metered, allowMetered, catalog, others) }
@@ -465,7 +497,7 @@ fun SocialAccessScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenHome: 
             TrialCard(
                 state = state,
                 plannedMethods = plannedMethods,
-                onOpenTarget = { state.target?.let { openUrl(context, it.url) } },
+                onOpenTarget = { state.target?.let { t -> openTarget(context, t, state.candidate?.surface, settings.socialBrowserPackage) } },
                 onKeep = { id -> viewModel.keepSocialStrategy(id) { ok -> if (ok) { error = ""; info = "Kaydedildi: manuel stratejin de $id oldu." } } },
                 onManual = { viewModel.setSocialAccessMode(TestMode.MANUAL) },
             )
@@ -592,7 +624,8 @@ private fun PlatformRow(
                 TextButton(onClick = { onReport("RESOLVED") }) { Text("Çalışıyor") }
                 TextButton(onClick = { onReport("PARTIAL") }) { Text("Kısmen") }
                 TextButton(onClick = { onReport("STILL_PRESENT") }) { Text("Çalışmıyor") }
-                TextButton(onClick = { onReport("NOT_TESTED") }) { Text("Test edemedim") }
+                TextButton(onClick = { onReport("VERIFICATION_REQUIRED") }) { Text("Doğrulama istiyor") }
+                TextButton(onClick = { onReport("UNSURE") }) { Text("Emin değilim") }
             }
         }
     }
@@ -657,8 +690,9 @@ private fun TrialCard(
                         modifier = Modifier.weight(1f), tone = ButtonTone.Tonal)
                 }
                 Row {
-                    TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("PARTIAL")) } }) { Text("Kısmen çalışıyor") }
-                    TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("NOT_TESTED")) } }) { Text("Test edemedim") }
+                    TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("PARTIAL")) } }) { Text("Kısmen") }
+                    TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("VERIFICATION_REQUIRED")) } }) { Text("Doğrulama istiyor") }
+                    TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("UNSURE")) } }) { Text("Emin değilim") }
                 }
                 if (state.userOutcome == "PARTIAL")
                     TextButton(onClick = { SocialAccessRuntime.launch { feedback(state.feedback("PARTIAL_ACCEPTED")) } }) { Text("Böyle kullan") }
@@ -677,6 +711,10 @@ private fun TrialCard(
                     AppButton("Açıldı", { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "RESOLVED") } } }, modifier = Modifier.weight(1f))
                     AppButton("Hâlâ açılmıyor", { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "STILL_PRESENT") } } },
                         modifier = Modifier.weight(1f), tone = ButtonTone.Tonal)
+                }
+                Row {
+                    TextButton(onClick = { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "VERIFICATION_REQUIRED") } } }) { Text("Doğrulama istiyor") }
+                    TextButton(onClick = { state.target?.let { t -> SocialAccessRuntime.launch { report(t.key, "UNSURE") } } }) { Text("Emin değilim") }
                 }
             }
             if (state.mode == TestMode.AUTO_BETA && (state.phase != Phase.FINISHED || state.deferred.isNotEmpty())) TextButton(onClick = onManual) { Text("Manuel devam et") }
@@ -702,15 +740,26 @@ private fun HowItWorks() {
                 "1. Birlikte çalışması gereken uygulamaları seç; istersen açılmayan içeriğin bağlantısını yapıştır.",
                 "2. Uygulama mevcut tünelde yerel DPI profillerini (ISS'ne göre sıralı) tek tek dener ve her birini seçili BÜTÜN uygulamalarda ölçer.",
                 "3. Çalışan bir uygulamayı bozan profil reddedilir. İşe yarayan profil motorun planı olur; ayar ya da ağ değişince kaybolmaz.",
-                "Trafik uzak bir sunucuya yönlendirilmez. Plan, tünelden geçen bütün uygulamaları etkiler; giriş, yaş doğrulama ve hesap kısıtları yerel ayarla çözülmez.",
+                "Android'in VPN izni burada yalnız cihaz içinde yerel bir tünel kurmak içindir: trafik uzak bir sunucuya ya da başka ülkeye yönlendirilmez, IP adresin değişmez. Plan, tünelden geçen bütün uygulamaları etkiler.",
+                "Giriş, yaş/kimlik doğrulaması ve hesap kısıtları platformun sunucusunda tutulur; yerel DNS/DPI ayarı bunları değiştiremez. \"Erişim yolu\" yalnız hangi resmî yüzeyin bu ağda gerçekten çalıştığını kaydeder.",
             ).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
 
-private fun openUrl(context: android.content.Context, url: String) {
+/**
+ * Denemenin yüzeyine göre AÇIK hedefleme: resmî web denemesi seçilen tarayıcıda
+ * (App Links native uygulamaya çeviremez), diğerleri resmî uygulamada açılır.
+ * Uygulama kurulu değilse tarayıcıya düşülür.
+ */
+private fun openTarget(context: android.content.Context, target: Target, surface: String?, browser: String) {
+    val platform = SocialPlatform.byId(target.platformId)
+    val chosen = net.atom.dpibypass.social.AccessLauncher.effectiveBrowser(context, browser.ifBlank { null })
+    if (surface != "OFFICIAL_WEB" && platform != null &&
+        net.atom.dpibypass.social.AccessLauncher.openInApp(context, platform, target.url) == net.atom.dpibypass.social.AccessLauncher.LaunchResult.OPENED) return
+    if (net.atom.dpibypass.social.AccessLauncher.openInBrowser(context, chosen, target.url) == net.atom.dpibypass.social.AccessLauncher.LaunchResult.OPENED) return
     try {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (_: ActivityNotFoundException) {
     }
 }
@@ -734,5 +783,6 @@ private fun finishLabel(value: String) = when (value) {
     "CANDIDATES_EXHAUSTED" -> "Bu turdaki uygun yöntemler bitti."
     "NO_APPLICABLE_METHODS" -> "Bu kapsamda uygulanabilir yöntem bulunmadı."
     "PARTIAL_ACCEPTED" -> "Kısmi erişimi kabul ettin."
+    "PLATFORM_GATE" -> "Platform doğrulama istiyor; yerel ağ yöntemleri bu sunucu şartını değiştirmez."
     else -> "Deneme durduruldu."
 }

@@ -162,6 +162,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         repo.updateSocialPlatforms { if (selected) it + id else it - id }
     }
     fun setSocialTargetUrl(v: String) = launch { repo.setSocialTargetUrl(v) }
+    fun setSocialBrowserPackage(v: String) = launch { repo.setSocialBrowserPackage(v) }
     /** Kapsam dışındaki platform için tek adımlı düzeltme (kullanıcının açık komutu). */
     fun bringIntoScope(packages: Set<String>) = launch { repo.bringIntoScope(packages) }
     fun restoreScopeBackup() = launch { repo.restoreScopeBackup() }
