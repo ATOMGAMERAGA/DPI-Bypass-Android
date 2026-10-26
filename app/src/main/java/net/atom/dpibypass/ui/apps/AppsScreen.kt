@@ -35,7 +35,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -390,16 +389,19 @@ private val iconCache = LruCache<String, ImageBitmap>(180)
 @Composable
 private fun rememberAppIcon(packageName: String): ImageBitmap? {
     val context = LocalContext.current
-    return produceState<ImageBitmap?>(initialValue = iconCache.get(packageName), packageName) {
-        if (value == null) {
-            value = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.packageManager
-                        .getApplicationIcon(packageName)
-                        .toBitmap(width = 96, height = 96)
-                        .asImageBitmap()
-                }.getOrNull()?.also { iconCache.put(packageName, it) }
-            }
+    // Anahtarlı produceState yerine remember + LaunchedEffect: aynı davranış (paket
+    // değişince yeniden çözülür, iptal edilir), ama lint'in anahtarlı aşırı yüklemede
+    // atamayı göremediği yanlış pozitif (ProduceStateDoesNotAssignValue) oluşmaz.
+    val icon = remember(packageName) { mutableStateOf(iconCache.get(packageName)) }
+    LaunchedEffect(packageName) {
+        if (icon.value == null) icon.value = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager
+                    .getApplicationIcon(packageName)
+                    .toBitmap(width = 96, height = 96)
+                    .asImageBitmap()
+            }.getOrNull()?.also { iconCache.put(packageName, it) }
         }
-    }.value
+    }
+    return icon.value
 }

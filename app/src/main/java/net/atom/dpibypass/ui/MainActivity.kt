@@ -48,10 +48,16 @@ import net.atom.dpibypass.ui.mode.ModeScreen
 import net.atom.dpibypass.ui.nav.BottomDock
 import net.atom.dpibypass.ui.nav.TabletRail
 import net.atom.dpibypass.ui.nav.Dest
+import net.atom.dpibypass.ui.nav.SocialAdvancedRoute
+import net.atom.dpibypass.ui.nav.SocialDiagnosticsRoute
 import net.atom.dpibypass.ui.nav.SocialRoute
+import net.atom.dpibypass.ui.nav.showsDock
+import androidx.navigation.compose.currentBackStackEntryAsState
 import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
 import net.atom.dpibypass.ui.settings.SettingsScreen
-import net.atom.dpibypass.ui.social.SocialAccessScreen
+import net.atom.dpibypass.ui.social.SocialAdvancedScreen
+import net.atom.dpibypass.ui.social.SocialDiagnosticsScreen
+import net.atom.dpibypass.ui.social.SocialGuideScreen
 import net.atom.dpibypass.ui.theme.DpiBypassTheme
 import net.atom.dpibypass.util.DeviceInfo
 import net.atom.dpibypass.util.QuickTile
@@ -67,6 +73,8 @@ class MainActivity : ComponentActivity() {
 
     private fun registerForActivityResultInternal() =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            // Sonuç rehbere de bildirilir: ret ayrı bir düzeltme adımıyla gösterilir.
+            viewModel.onVpnPermissionResult(result.resultCode == RESULT_OK)
             if (result.resultCode == RESULT_OK) {
                 ServiceController.start(this)
             }
@@ -99,6 +107,7 @@ class MainActivity : ComponentActivity() {
     /** Bağlan: VPN izni gerekiyorsa iste, yoksa doğrudan başlat. */
     private fun connect() {
         val prepare = VpnService.prepare(this)
+        viewModel.clearVpnPermissionDenied()
         if (prepare != null) {
             vpnPermissionLauncher.launch(prepare)
         } else {
@@ -146,6 +155,7 @@ private fun AppRoot(
     discordInstalled: Boolean,
 ) {
     val navController = rememberNavController()
+    val backStack by navController.currentBackStackEntryAsState()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     // Ekranların kaydırma durumu kabuk öğeleriyle (başlık şeridi, dock) burada
@@ -189,7 +199,7 @@ private fun AppRoot(
                         navController = navController,
                         modifier = Modifier.align(Alignment.CenterStart),
                     )
-                } else {
+                } else if (showsDock(backStack?.destination?.route)) {
                     BottomDock(
                         navController = navController,
                         modifier = Modifier
@@ -247,17 +257,33 @@ private fun AppRoot(
                         onOpenSocial = { navController.navigate(SocialRoute) { launchSingleTop = true } },
                     )
                 }
+                val openTab: (String) -> Unit = { route ->
+                    navController.navigate(route) {
+                        popUpTo(Dest.Home.route)
+                        launchSingleTop = true
+                    }
+                }
                 composable(SocialRoute) {
-                    SocialAccessScreen(
+                    SocialGuideScreen(
+                        viewModel = viewModel,
+                        onClose = { navController.popBackStack() },
+                        onOpenHome = { openTab(Dest.Home.route) },
+                        onOpenAdvanced = { navController.navigate(SocialAdvancedRoute) { launchSingleTop = true } },
+                        onOpenDiagnostics = { navController.navigate(SocialDiagnosticsRoute) { launchSingleTop = true } },
+                        onConnect = onConnect,
+                    )
+                }
+                composable(SocialAdvancedRoute) {
+                    SocialAdvancedScreen(
                         viewModel = viewModel,
                         onBack = { navController.popBackStack() },
-                        onOpenHome = {
-                            navController.navigate(Dest.Home.route) {
-                                popUpTo(Dest.Home.route)
-                                launchSingleTop = true
-                            }
-                        },
+                        onOpenDiagnostics = { navController.navigate(SocialDiagnosticsRoute) { launchSingleTop = true } },
+                        onOpenSettings = { openTab(Dest.Settings.route) },
+                        onOpenApps = { openTab(Dest.Apps.route) },
                     )
+                }
+                composable(SocialDiagnosticsRoute) {
+                    SocialDiagnosticsScreen(onBack = { navController.popBackStack() })
                 }
             }
         }

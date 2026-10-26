@@ -57,6 +57,9 @@ data class Settings(
     // (boş: sistemin varsayılan tarayıcısı). App Links'in web denemesini sessizce
     // native uygulamaya çevirmesini önlemek için niyet bu pakete hedeflenir.
     val socialBrowserPackage: String = "",
+    // Rehberde kullanıcının AÇIKÇA seçtiği birincil (sorun yaşanan) uygulama. Boşsa
+    // seçilmemiştir: odak, enum sırasından ya da ilk seçilenden çıkarılmaz.
+    val socialPrimaryPlatform: String = "",
     // "Sadece Discord" öncesindeki uygulama kapsamı yedeği var mı? (geri alınabilir)
     val scopeBackupAvailable: Boolean = false,
     /**
@@ -148,6 +151,8 @@ class SettingsRepository(
             ?.filter { net.atom.dpibypass.social.SocialPlatform.byId(it) != null }?.toSet() ?: emptySet(),
         socialTargetUrl = runCatching { this[Keys.SOCIAL_TARGET_URL] }.getOrNull() ?: "",
         socialBrowserPackage = runCatching { this[Keys.SOCIAL_BROWSER] }.getOrNull() ?: "",
+        socialPrimaryPlatform = runCatching { this[Keys.SOCIAL_PRIMARY] }.getOrNull()
+            ?.takeIf { net.atom.dpibypass.social.SocialPlatform.byId(it) != null } ?: "",
         scopeBackupAvailable = this[Keys.SCOPE_BACKUP_MODE] != null,
         loaded = true,
     )
@@ -223,6 +228,12 @@ class SettingsRepository(
     suspend fun setSocialTargetUrl(v: String) = put(Keys.SOCIAL_TARGET_URL, v.take(2048))
     suspend fun setSocialBrowserPackage(v: String) = put(Keys.SOCIAL_BROWSER, v.take(255))
 
+    /** Birincil uygulama seçimi; seçili platformlara da eklenir (tek atomik yazım). */
+    suspend fun setSocialPrimary(id: String) = store.edit {
+        it[Keys.SOCIAL_PRIMARY] = id
+        it[Keys.SOCIAL_PLATFORMS] = (it[Keys.SOCIAL_PLATFORMS] ?: emptySet()) + id
+    }
+
     /**
      * Ağ profili: bir ağ anahtarına (taşıyıcı + ISS) o ağda KAZANMIŞ stratejiyi
      * bağlar. Bağlanırken önce bu strateji canlı olarak doğrulanır; çalışıyorsa
@@ -275,6 +286,7 @@ class SettingsRepository(
         val SOCIAL_PLATFORMS = stringSetPreferencesKey("social_access_platforms")
         val SOCIAL_TARGET_URL = stringPreferencesKey("social_access_target_url")
         val SOCIAL_BROWSER = stringPreferencesKey("social_access_browser_package")
+        val SOCIAL_PRIMARY = stringPreferencesKey("social_access_primary_platform")
         val SCOPE_BACKUP_MODE = stringPreferencesKey("scope_backup_mode")
         val SCOPE_BACKUP_APPS = stringSetPreferencesKey("scope_backup_apps")
         val OPERATION_MODE = stringPreferencesKey("operation_mode")

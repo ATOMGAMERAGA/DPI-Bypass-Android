@@ -69,6 +69,16 @@ object AccessLauncher {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE).setPackage(pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try { context.startActivity(intent); LaunchResult.OPENED } catch (_: ActivityNotFoundException) { LaunchResult.NO_BROWSER } catch (_: Exception) { LaunchResult.FAILED }
     }
+
+    /**
+     * İstenen yüzeyi açar; başarısızlıkta BAŞKA bir yüzeye düşmez. Eskiden son çare
+     * olarak hedefsiz bir `ACTION_VIEW` gönderiliyordu: App Links bunu native
+     * uygulamaya verebilir ve tarayıcı denemesi uygulamada yapılmış olurdu.
+     */
+    fun open(context: Context, surface: AccessSurface, platform: SocialPlatform?, url: String, browserPackage: String?): LaunchResult = when (surface) {
+        AccessSurface.OFFICIAL_APP -> platform?.let { openInApp(context, it, url) } ?: LaunchResult.NOT_INSTALLED
+        AccessSurface.OFFICIAL_WEB -> openInBrowser(context, browserPackage, url)
+    }
 }
 
 /**
@@ -82,6 +92,11 @@ class AccessRouteStore(context: Context) {
     private val mutable = MutableStateFlow(RouteLedger())
     val ledger: StateFlow<RouteLedger> = mutable.asStateFlow()
     @Volatile var recoveredUnreadable = false; private set
+    /**
+     * Okunamayan eski dosya yedeklenemediyse kayıt dosyasına YAZILMAZ: yoksa
+     * kullanıcının (belki daha yeni sürümün) verisi sessizce ezilirdi.
+     */
+    @Volatile var writeBlocked = false; private set
     @Volatile private var loaded = false
 
     @Synchronized fun load() {
@@ -89,25 +104,32 @@ class AccessRouteStore(context: Context) {
         val raw = try { file.openRead().bufferedReader().use { it.readText() } } catch (_: FileNotFoundException) { null } catch (_: Exception) { "" }
         val decoded = AccessRoutes.decode(raw)
         if (!decoded.readable && !raw.isNullOrEmpty()) {
-            runCatching { File(dir, "social-access-routes.unreadable.json").takeIf { !it.exists() }?.writeText(raw) }
+            val backup = File(dir, "social-access-routes.unreadable.json")
+            val saved = backup.exists() || runCatching { backup.writeText(raw) }.isSuccess
             recoveredUnreadable = true
+            writeBlocked = !saved
         }
         mutable.value = decoded.ledger
         loaded = true
     }
 
-    @Synchronized fun accept(report: RouteReport, current: RouteContext, nowMs: Long): RouteRejection? {
+    /** Bağlam [current] ile KABUL ANINDA karşılaştırılır; yazma hatası ayrı sonuçtur. */
+    @Synchronized fun accept(report: RouteReport, current: RouteContext?, nowMs: Long): RouteSave {
         load()
-        val (next, rejection) = AccessRoutes.accept(mutable.value, report, current, nowMs)
-        if (rejection == null) save(next)
-        return rejection
+        val (next, result) = AccessRoutes.commit(mutable.value, report, current, nowMs) { save(it) }
+        mutable.value = next
+        return result
     }
 
-    @Synchronized fun setAccountAge(platformId: String, age: AccountAge) { load(); save(AccessRoutes.setAccountAge(mutable.value, platformId, age)) }
+    @Synchronized fun setAccountAge(platformId: String, age: AccountAge): Boolean {
+        load()
+        return runCatching { save(AccessRoutes.setAccountAge(mutable.value, platformId, age)) }.isSuccess
+    }
 
-    @Synchronized fun clear() { load(); save(RouteLedger(accountAge = mutable.value.accountAge)) }
+    @Synchronized fun clear(): Boolean { load(); return runCatching { save(RouteLedger(accountAge = mutable.value.accountAge)) }.isSuccess }
 
     private fun save(next: RouteLedger) {
+        check(!writeBlocked) { "UNREADABLE_FILE_NOT_BACKED_UP" }
         val stream = file.startWrite()
         try { stream.write(AccessRoutes.encode(next).toString().toByteArray(Charsets.UTF_8)); file.finishWrite(stream) }
         catch (e: Exception) { file.failWrite(stream); throw e }

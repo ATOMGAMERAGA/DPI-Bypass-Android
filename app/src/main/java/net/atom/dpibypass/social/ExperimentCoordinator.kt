@@ -148,19 +148,24 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
      */
     private fun budget(targets: Int) = (24 + 10 * (targets - 1).coerceAtLeast(0)).coerceAtMost(MAX_ROUND_REQUESTS)
 
+    /**
+     * Yeni tur başlatır. Dönüş: başlayan turun oturum kimliği; tur başlamadıysa
+     * (kapalı, kurtarma gerekli, seçili bir hedef hız sınırı beklemesinde) null.
+     */
     suspend fun start(goal: Goal, target: Target, mode: TestMode, baselineStillPresent: Boolean?,
-        metered: Boolean, allowMeteredRenderer: Boolean, candidates: List<CandidateDefinition>, others: List<Target> = emptyList()) {
-        if (!enabledFlag) return
+        metered: Boolean, allowMeteredRenderer: Boolean, candidates: List<CandidateDefinition>, others: List<Target> = emptyList()): String? {
+        if (!enabledFlag) return null
         // Hız sınırı bildiren HERHANGİ bir seçili hedef (odak dışı da) beklenir: aynı
         // motor hepsini etkilediği için o hedefe istek atmadan aday değerlendirilemez.
         (listOf(target) + others).firstOrNull { cooldownRemaining(it.key) > 0 }?.let { waiting ->
             mutex.withLock { update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN",
                 message = "${label(waiting)} hız sınırı bildirdi; bekleme süresi henüz dolmadı. Bekleyin ya da bu uygulamayı seçimden çıkarın.") } }
-            return
+            return null
         }
         stopTrial()
+        val session: String
         mutex.withLock {
-            if (!enabledFlag || state.value.phase == Phase.RECOVERY_REQUIRED) return
+            if (!enabledFlag || state.value.phase == Phase.RECOVERY_REQUIRED) return null
             eventIds.clear(); probeMs = 0; groupAttempts = 0; pendingResolution = null; autoCorrected = adapter.quarantined(target, goal)
             autoEvaluated = false; best = null; candidateOutcomes = emptyMap(); before = emptyMap(); rejected.clear()
             runCatching { adapter.beginSession() }
@@ -172,15 +177,17 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             val all = (listOf(target) + others).distinctBy { it.key }
             roundBudget = budget(all.size)
             val previous = state.value
-            mutable.value = TrialState(phase = Phase.BASELINING, mode = mode, sessionId = id(), goal = goal, target = target, targets = all,
+            session = id()
+            mutable.value = TrialState(phase = Phase.BASELINING, mode = mode, sessionId = session, goal = goal, target = target, targets = all,
                 results = previous.results, plan = previous.plan, contextGeneration = previous.contextGeneration,
                 message = "Başlangıç ölçümü: hedefin şu anki durumu", version = previous.version + 1)
             if (baselineStillPresent == false) {
                 update { copy(phase = Phase.FINISHED, finishReason = "ALREADY_ACCESSIBLE", message = "Sorun başlangıçta yok; yöntem başarısı yazılmadı.") }
-                return
+                return session
             }
         }
         launchNext()
+        return session
     }
 
     private fun launchNext() {
@@ -468,8 +475,15 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
         val candidate = s.candidate
         adapter.journal(s.operationId, "KEEP_INTENT_DURABLE", candidate)
         if (candidate?.strategyId != null && !runCatching { adapter.commit(s.operationId) }.getOrDefault(false)) {
-            update { copy(message = "Yöntem motorda kalıcılaştırılamadı; geri alındı, başarı yazılmadı.") }
-            rollback(); return
+            // Eskiden geri alınıp SELECTING'de bırakılıyordu: sıradaki tur hiç
+            // planlanmadığı için deneme "hazırlanıyor"da asılı kalırdı. Artık aday
+            // kuyruğun başına döner ve tur açık bir nedenle duraklar.
+            if (rollback()) {
+                pending.addFirst(candidate)
+                update { copy(phase = Phase.PAUSED, pauseReason = "KEEP_FAILED", userOutcome = "NOT_TESTED",
+                    message = "Yöntem motorda kalıcılaştırılamadı; geri alındı, başarı yazılmadı.") }
+            }
+            return
         }
         adapter.journal(s.operationId, "KEPT", candidate)
         val focus = s.target
@@ -519,8 +533,10 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
         if (next) launchNext()
     }
 
-    suspend fun feedback(event: Feedback) {
+    /** Dönüş: bildirim bu denemeye kabul edildi mi? (Eski/yinelenen bildirim false.) */
+    suspend fun feedback(event: Feedback): Boolean {
         var next = false
+        var accepted = false
         val snapshot = state.value
         if (event.outcome == "RESOLVED" && snapshot.phase == Phase.PROBING && event.sessionId == snapshot.sessionId &&
             event.attemptId == snapshot.attemptId && event.operationId == snapshot.operationId && event.contextGeneration == snapshot.contextGeneration &&
@@ -530,7 +546,8 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             val accepts = s.phase == Phase.WAITING_FOR_USER || event.outcome == "RESOLVED" &&
                 (s.phase == Phase.AUTO_EVALUATING || s.phase == Phase.PAUSED && s.pauseReason == "USER_ACTION_REQUIRED")
             if (event.outcome !in FeedbackOutcomes || !accepts || event.sessionId != s.sessionId || event.attemptId != s.attemptId || event.operationId != s.operationId ||
-                event.contextGeneration != s.contextGeneration || event.modeGeneration != s.modeGeneration || event.expectedStateVersion != s.version || !eventIds.add(event.eventId)) return
+                event.contextGeneration != s.contextGeneration || event.modeGeneration != s.modeGeneration || event.expectedStateVersion != s.version || !eventIds.add(event.eventId)) return false
+            accepted = true
             inactivity?.cancel()
             update { copy(userOutcome = event.outcome) }
             when (event.outcome) {
@@ -552,6 +569,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             }
         }
         if (next) launchNext()
+        return accepted
     }
 
     /**
@@ -560,12 +578,14 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
      * yanlış pozitif düzeltmesidir: plan geri alınır, aday bu oturumda yeniden
      * başarı sayılmaz ve sıradaki adaylarla devam edilir.
      */
-    suspend fun report(key: String, outcome: String) {
-        if (outcome !in ReportOutcomes) return
+    /** Dönüş: bildirim bir hedefe yazıldı mı? */
+    suspend fun report(key: String, outcome: String): Boolean {
+        if (outcome !in ReportOutcomes) return false
         var continueSearch = false
         mutex.withLock {
             val s = state.value
-            val old = s.results[key] ?: s.targets.firstOrNull { it.key == key }?.let { TargetResult(it.key, it.platformId) } ?: return
+            val old = s.results[key] ?: s.targets.firstOrNull { it.key == key }?.let { TargetResult(it.key, it.platformId) }
+                ?: SocialPlatform.byId(key)?.takeIf { it != SocialPlatform.CUSTOM }?.let { TargetResult(key, it.id) } ?: return false
             val status = when (outcome) { "RESOLVED" -> CheckStatus.PASS; "PARTIAL" -> CheckStatus.PARTIAL; "STILL_PRESENT" -> CheckStatus.FAIL
                 "VERIFICATION_REQUIRED" -> CheckStatus.GATED; else -> CheckStatus.UNKNOWN }
             // Kullanıcı bildirimi otomatik kanıt değildir: kaynağı USER, bağlamı bu kuşak.
@@ -585,7 +605,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             if (outcome == "STILL_PRESENT" && autoPlan) {
                 s.target?.let { t -> s.goal?.let { g -> runCatching { adapter.quarantine(t, g) } } }
                 s.candidate?.let { rejected += it.id }
-                if (!revertPlanLocked()) return
+                if (!revertPlanLocked()) return true
                 update { copy(phase = Phase.SELECTING, finishReason = null, causalAttribution = "NOT_ESTABLISHED",
                     message = "Yanlış pozitif düzeltildi: yöntem geri alındı, bu oturumda yeniden başarı sayılmayacak. Sıradaki yöntemlere geçiliyor.") }
                 continueSearch = enabledFlag && pending.isNotEmpty()
@@ -593,6 +613,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             }
         }
         if (continueSearch) launchNext()
+        return true
     }
 
     suspend fun manual() {

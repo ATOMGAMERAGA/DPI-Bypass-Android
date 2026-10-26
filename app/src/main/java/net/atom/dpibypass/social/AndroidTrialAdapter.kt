@@ -128,11 +128,11 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
         if (candidate.strategyId != null) {
             checkNotNull(engine) { "VPN permission/connection required" }.applyAlpha(candidate.strategyId, operationId)
         } else if (candidate.surface == "OFFICIAL_WEB") {
-            val t = checkNotNull(target)
-            // Only a fixed, canonical HTTPS target can reach this intent. Browser closure is not owned.
-            // Niyet bir tarayıcı paketine hedeflenir: App Links web denemesini native uygulamaya çeviremez.
-            val result = AccessLauncher.openInBrowser(app, AccessLauncher.effectiveBrowser(app, browserPackage), t.url)
-            check(result == AccessLauncher.LaunchResult.OPENED) { "Browser unavailable: $result" }
+            checkNotNull(target)
+            // Resmî web yolu burada AÇILMAZ: rehber, kullanıcı "… ile aç" dediğinde
+            // seçilen tarayıcı paketini açar ve açılışın gerçekten olduğunu görür.
+            // Burada yalnız açılabilecek bir tarayıcının bulunduğu doğrulanır.
+            checkNotNull(AccessLauncher.effectiveBrowser(app, browserPackage)) { "Browser unavailable" }
         }
     }
     override suspend fun rollback(operationId: String): Boolean {
@@ -339,19 +339,36 @@ object SocialAccessRuntime {
      * Kullanıcının erişim yolu bildirimi. Bildirimle AYNI ANDA, o yüzeyin gerçek
      * güzergâhından (paket tünelde ve motor açıksa yerel SOCKS, değilse doğrudan)
      * platformun kontrol adresine tek bir ağ yolu ölçümü yapılır; böylece doğrulama
-     * ekranının ağ sorunundan mı sunucu şartından mı geldiği ayrılır. Hız sınırı
+     * ekranının ağ sorunundan mı platformdan mı geldiği kabaca ayrılır. Hız sınırı
      * beklemesindeki hedefe istek atılmaz (NOT_MEASURED).
+     *
+     * Bağlam iki kez denetlenir: ölçümden önce (boşuna istek atılmasın) ve kayıt
+     * KABUL edilirken ([current] o anki bağlamı verir) — ölçüm sürerken ağ, profil
+     * ya da tarayıcı değiştiyse bildirim eski bağlama yazılmaz.
      */
     suspend fun recordRoute(platform: SocialPlatform, action: AccessAction, surface: AccessSurface, browser: String?, account: AccountContext,
-        outcome: RouteOutcome, freshStart: Boolean, surfaceInTunnel: Boolean, context: RouteContext): RouteRejection? = withContext(Dispatchers.IO) {
+        outcome: RouteOutcome, freshStart: Boolean, surfaceInTunnel: Boolean, context: RouteContext, current: () -> RouteContext?): RouteSave = withContext(Dispatchers.IO) {
         val through = surfaceInTunnel && adapter.available()
         val home = Target.home(platform.id)
-        val evidence = if (home == null || adapter.cooldownRemainingMillis(home.key) > 0 || !networkUsable()) null
-            else withTimeoutOrNull(20_000) { runCatching { adapter.probe(home, through) }.getOrNull() }
-        evidence?.takeIf { it.retryAfterSeconds > 0 }?.let { e -> home?.let { runCatching { adapter.persistCooldown(it.key, e.retryAfterSeconds * 1000) } } }
-        val network = when (evidence?.technicalOutcome) { null -> "NOT_MEASURED"; "PASS" -> "PASS"; "FAIL" -> "FAIL"; else -> "UNKNOWN" }
-        routes.accept(RouteReport(platform.id, action, surface, browser, account, outcome, context, if (through) "TUNNEL" else "DIRECT",
-            network, evidence?.failureClass.orEmpty(), freshStart, System.currentTimeMillis()), context, System.currentTimeMillis())
+        AccessRoutes.record(platform, action, surface, browser, account, outcome, freshStart, if (through) "TUNNEL" else "DIRECT", context, current,
+            System::currentTimeMillis,
+            measure = {
+                val evidence = if (home == null || adapter.cooldownRemainingMillis(home.key) > 0 || !networkUsable()) null
+                    else withTimeoutOrNull(20_000) { runCatching { adapter.probe(home, through) }.getOrNull() }
+                evidence?.takeIf { it.retryAfterSeconds > 0 }?.let { e -> home?.let { runCatching { adapter.persistCooldown(it.key, e.retryAfterSeconds * 1000) } } }
+                evidence
+            },
+            accept = { report, now, at -> routes.accept(report, now, at) })
+    }
+
+    /** Ölçülü (mobil veri gibi) bağlantı mı? Bilinmiyorsa ölçülü sayılır. */
+    fun metered(): Boolean = cm?.isActiveNetworkMetered ?: true
+
+    /** Cihazda bu uygulamanınki dışında etkin bir VPN var mı? (yalnız bilgi; dokunulmaz) */
+    fun otherVpnActive(ownConnected: Boolean): Boolean {
+        if (ownConnected) return false
+        val manager = cm ?: return false
+        return runCatching { manager.allNetworks.any { n -> manager.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true } }.getOrDefault(false)
     }
 
     /** Seçili platformların strateji doğrulamasında denenecek alan adları. */

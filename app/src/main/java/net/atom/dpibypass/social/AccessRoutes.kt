@@ -19,14 +19,18 @@ import java.time.ZoneId
 // [RouteVerdict.ALL_SURFACES_GATED] olarak AÇIKÇA söyler.
 // ---------------------------------------------------------------------------
 
-/** Ayrı değerlendirilen işlevler. Biri diğerinin başarısı sayılmaz. */
-enum class AccessAction(val label: String, val needsAccount: Boolean) {
-    VIEW_CONTENT("İçerik görüntüleme", false),
-    PLAY_MEDIA("Video / medya", false),
-    ACCOUNT_ACCESS("Hesabıma erişim (akış, profil)", true),
-    MESSAGING("Mesajlaşma", true),
-    POSTING("Paylaşım", true),
-    VOICE_CALL("Sesli görüşme", true);
+/**
+ * Ayrı değerlendirilen işlevler. Biri diğerinin başarısı sayılmaz.
+ * [capability]: deneme hedefinin ([Goal.requiredCapabilities]) gerçek işlev adı;
+ * otomatik gözlemci yalnız tanıdığı işlevlerde karar verir, diğerleri kullanıcıya sorulur.
+ */
+enum class AccessAction(val label: String, val needsAccount: Boolean, val capability: String) {
+    VIEW_CONTENT("İçerik görüntüleme", false, "VIEW_SELECTED_CONTENT"),
+    PLAY_MEDIA("Video / medya", false, "PLAY_MEDIA"),
+    ACCOUNT_ACCESS("Hesabıma erişim (akış, profil)", true, "VIEW_ACCOUNT_FEED"),
+    MESSAGING("Mesajlaşma", true, "SEND_MESSAGE"),
+    POSTING("Paylaşım", true, "POST_CONTENT"),
+    VOICE_CALL("Sesli görüşme", true, "VOICE_CALL");
 
     companion object { fun parse(v: String?) = entries.firstOrNull { it.name == v } }
 }
@@ -85,23 +89,55 @@ data class RouteReport(val platformId: String, val action: AccessAction, val sur
     val uiVersion: Int = AccessRoutes.UI_VERSION)
 
 /** Bildirimin kabul edilmeme nedenleri; hiçbiri başarıya çevrilmez. */
-enum class RouteRejection { STALE_UI, UNKNOWN_PLATFORM, ACTION_NOT_SUPPORTED, BROWSER_REQUIRED, CONTEXT_CHANGED, FUTURE_TIME }
+enum class RouteRejection { STALE_UI, UNKNOWN_PLATFORM, ACTION_NOT_SUPPORTED, SURFACE_NOT_SUPPORTED, BROWSER_REQUIRED, CONTEXT_CHANGED, FUTURE_TIME }
+
+/**
+ * Bir bildirimin kaydedilme sonucu. Reddedilen bildirim ile diske yazılamayan
+ * bildirim AYRI tutulur: yazma hatası "ağ değişti" diye gösterilmez.
+ */
+sealed interface RouteSave {
+    data object Saved : RouteSave
+    data class Rejected(val reason: RouteRejection) : RouteSave
+    /** Bildirim geçerliydi ama kayıt dosyasına yazılamadı (disk/izin/okunamayan eski dosya). */
+    data object WriteFailed : RouteSave
+}
 
 /** Hesabın yönetmelik yürürlüğüne göre ne zaman açıldığına dair kullanıcı beyanı (hesap kimliği yok). */
 enum class AccountAge { BEFORE_REGULATION, AFTER_REGULATION, UNKNOWN }
 
 enum class RouteStatus { VERIFIED, SINGLE_CONFIRMATION, PARTIAL, NOT_WORKING, PLATFORM_GATE, UNSURE, PREVIOUS_SESSION, NOT_TESTED }
 
-/** Doğrulama ekranının hangi katmanda olduğu (bildirim anındaki ağ ölçümüne göre). */
-enum class GateCause { SERVER_REQUIREMENT_NETWORK_OPEN, NETWORK_PROBLEM_SUSPECTED, NETWORK_NOT_MEASURED }
+/**
+ * Doğrulama ekranı görüldüğü andaki tek ağ ölçümünün söylediği. Kesin kök neden
+ * DEĞİLDİR: kontrol adresine ulaşılması platformun bütün hesap/doğrulama uç
+ * noktalarının çalıştığını, sonuçsuz ölçüm de kesin ağ arızasını göstermez.
+ *  - [CHECK_ADDRESS_REACHABLE]: kontrol adresine ulaşıldı; istek büyük olasılıkla platformdan
+ *  - [NETWORK_PROBLEM_SUSPECTED]: ölçülebilir bağlantı hatası vardı
+ *  - [NETWORK_UNCERTAIN]: ölçüm sonuçsuz kaldı (zaman aşımı, sunucu hatası, hız sınırı)
+ *  - [NETWORK_NOT_MEASURED]: ölçüm yapılamadı
+ */
+enum class GateCause { CHECK_ADDRESS_REACHABLE, NETWORK_PROBLEM_SUSPECTED, NETWORK_UNCERTAIN, NETWORK_NOT_MEASURED }
 
 data class SurfaceAssessment(val surface: AccessSurface, val browserPackage: String?, val status: RouteStatus,
     val confirmations: Int, val lastAtMs: Long, val account: AccountContext?, val gateCause: GateCause? = null, val routePath: String = "")
 
 enum class RouteVerdict { VERIFIED_ROUTE, TENTATIVE_ROUTE, ALL_SURFACES_GATED, NO_WORKING_ROUTE, NEEDS_REVERIFICATION, NOT_TESTED }
 
+/**
+ * [untested]: platformun bu işlemde desteklediği ama bu bağlamda henüz kesin
+ * sonucu olmayan yüzeyler. Boş değilse "bütün yollar kapalı" denmez.
+ */
 data class RouteDecision(val platformId: String, val action: AccessAction, val verdict: RouteVerdict,
-    val recommended: SurfaceAssessment?, val surfaces: List<SurfaceAssessment>, val explanation: String)
+    val recommended: SurfaceAssessment?, val surfaces: List<SurfaceAssessment>, val explanation: String,
+    val untested: List<AccessSurface> = emptyList())
+
+/** Önerilen yolun nasıl açılacağı. Kanıt hangi tarayıcıda alındıysa yalnız o tarayıcı açılır. */
+sealed interface RouteLaunch {
+    data object App : RouteLaunch
+    data class Browser(val packageName: String) : RouteLaunch
+    /** Kanıtın alındığı tarayıcı artık yok: başka tarayıcıya kanıt TAŞINMAZ, yeniden denenmelidir. */
+    data class BrowserMissing(val packageName: String?) : RouteLaunch
+}
 
 /** Değişmez kayıt defteri; bütün geçişler saf fonksiyonlardır (JVM'de sınanır). */
 data class RouteLedger(val reports: List<RouteReport> = emptyList(), val accountAge: Map<String, AccountAge> = emptyMap())
@@ -141,11 +177,35 @@ object AccessRoutes {
     private val MessagingPlatforms = setOf("instagram", "x", "tiktok", "discord", "reddit", "facebook", "telegram", "whatsapp", "signal", "snapchat")
     private val PostingPlatforms = setOf("youtube", "instagram", "x", "tiktok", "discord", "reddit", "facebook", "twitch", "snapchat")
 
+    /**
+     * Telefon tarayıcısında kullanılabilir resmî web istemcisi olmadığı için web
+     * yolu ÖNERİLMEYEN platformlar (Signal'in web istemcisi yok; WhatsApp ve
+     * Snapchat'in web istemcileri telefonda uygulamaya yönlendirir). Bu ürün
+     * tarafında temkinli bir seçimdir; sahada sınanmadı. Sesli görüşme web
+     * yolunda hiç önerilmez.
+     */
+    private val NoMobileWeb = setOf("signal", "whatsapp", "snapchat")
+
+    /** Bu işlem için denenmesi anlamlı resmî yüzeyler. Desteklenmeyen web işlemini kullanıcıya denettirmeyiz. */
+    fun surfaces(platform: SocialPlatform, action: AccessAction): Set<AccessSurface> = when {
+        action !in actions(platform) -> emptySet()
+        platform.id in NoMobileWeb || action == AccessAction.VOICE_CALL -> setOf(AccessSurface.OFFICIAL_APP)
+        else -> setOf(AccessSurface.OFFICIAL_APP, AccessSurface.OFFICIAL_WEB)
+    }
+
+    /** Önerilen yolun açılışı: web kanıtı yalnız kendi tarayıcısında geçerlidir. */
+    fun launchFor(rec: SurfaceAssessment, installedBrowsers: Set<String>): RouteLaunch = when (rec.surface) {
+        AccessSurface.OFFICIAL_APP -> RouteLaunch.App
+        AccessSurface.OFFICIAL_WEB -> rec.browserPackage?.takeIf { it in installedBrowsers }?.let { RouteLaunch.Browser(it) }
+            ?: RouteLaunch.BrowserMissing(rec.browserPackage)
+    }
+
     /** Doğrulanmış kabul: geçersiz rapor sessizce başarıya dönüşmez, nedeniyle reddedilir. */
     fun validate(r: RouteReport, current: RouteContext, nowMs: Long): RouteRejection? {
         if (r.uiVersion != UI_VERSION) return RouteRejection.STALE_UI
         val platform = SocialPlatform.byId(r.platformId)?.takeIf { it != SocialPlatform.CUSTOM } ?: return RouteRejection.UNKNOWN_PLATFORM
         if (r.action !in actions(platform)) return RouteRejection.ACTION_NOT_SUPPORTED
+        if (r.surface !in surfaces(platform, r.action)) return RouteRejection.SURFACE_NOT_SUPPORTED
         if (r.surface == AccessSurface.OFFICIAL_WEB && r.browserPackage.isNullOrBlank()) return RouteRejection.BROWSER_REQUIRED
         if (r.context != current) return RouteRejection.CONTEXT_CHANGED
         if (r.atMs > nowMs + 60_000) return RouteRejection.FUTURE_TIME
@@ -158,6 +218,35 @@ object AccessRoutes {
         val clean = if (r.surface == AccessSurface.OFFICIAL_APP) r.copy(browserPackage = null) else r
         val kept = (ledger.reports + clean).filter { nowMs - it.atMs in 0..RETENTION_MS }.takeLast(MAX_REPORTS)
         return ledger.copy(reports = kept) to null
+    }
+
+    /**
+     * Kabul + yazma, tek adımda. Bağlam KABUL ANINDA ([current]) karşılaştırılır:
+     * ölçüm sürerken ağ/profil değiştiyse bildirim eski bağlama yazılmaz. [write]
+     * hata verirse kayıt değişmez ve [RouteSave.WriteFailed] döner.
+     */
+    fun commit(ledger: RouteLedger, r: RouteReport, current: RouteContext?, nowMs: Long, write: (RouteLedger) -> Unit): Pair<RouteLedger, RouteSave> {
+        if (current == null) return ledger to RouteSave.Rejected(RouteRejection.CONTEXT_CHANGED)
+        val (next, rejection) = accept(ledger, r, current, nowMs)
+        if (rejection != null) return ledger to RouteSave.Rejected(rejection)
+        return try { write(next); next to RouteSave.Saved } catch (_: Exception) { ledger to RouteSave.WriteFailed }
+    }
+
+    /**
+     * Bir kullanıcı bildirimini kaydeder: bağlam önce (boşuna ölçüm yapılmasın) ve
+     * KABUL ANINDA ([current] o anki bağlamı verir) denetlenir; arada [measure] ile
+     * o yüzeyin güzergâhından tek bir ağ ölçümü alınır. [accept] kaydın kendisidir
+     * (uygulamada dosya, testte bellek).
+     */
+    suspend fun record(platform: SocialPlatform, action: AccessAction, surface: AccessSurface, browser: String?, account: AccountContext,
+        outcome: RouteOutcome, freshStart: Boolean, routePath: String, opened: RouteContext, current: () -> RouteContext?, nowMs: () -> Long,
+        measure: suspend () -> NetworkEvidence?, accept: (RouteReport, RouteContext?, Long) -> RouteSave): RouteSave {
+        if (current() != opened) return RouteSave.Rejected(RouteRejection.CONTEXT_CHANGED)
+        val evidence = measure()
+        val network = when (evidence?.technicalOutcome) { null -> "NOT_MEASURED"; "PASS" -> "PASS"; "FAIL" -> "FAIL"; else -> "UNKNOWN" }
+        val now = nowMs()
+        return accept(RouteReport(platform.id, action, surface, browser, account, outcome, opened, routePath, network,
+            evidence?.failureClass.orEmpty(), freshStart, now), current(), now)
     }
 
     fun setAccountAge(ledger: RouteLedger, platformId: String, age: AccountAge): RouteLedger =
@@ -177,16 +266,20 @@ object AccessRoutes {
         val olderContexts = relevant.size - sameNetwork.size
         val recommended = surfaces.firstOrNull { it.status == RouteStatus.VERIFIED } ?: surfaces.firstOrNull { it.status == RouteStatus.SINGLE_CONFIRMATION || it.status == RouteStatus.PARTIAL }
         val tested = surfaces.filter { it.status != RouteStatus.PREVIOUS_SESSION && it.status != RouteStatus.UNSURE }
+        // "Bütün yollar" yalnız platformun bu işlemde desteklediği HER yüzey bu bağlamda
+        // kesin sonuç verdiyse söylenebilir; denenmemiş desteklenen yüzey sonraki adımdır.
+        val supported = SocialPlatform.byId(platformId)?.let { surfaces(it, action) }.orEmpty()
+        val untested = AccessSurface.entries.filter { s -> s in supported && tested.none { it.surface == s } }
         val verdict = when {
             surfaces.any { it.status == RouteStatus.VERIFIED } -> RouteVerdict.VERIFIED_ROUTE
             recommended != null -> RouteVerdict.TENTATIVE_ROUTE
-            tested.isNotEmpty() && tested.all { it.status == RouteStatus.PLATFORM_GATE && it.gateCause == GateCause.SERVER_REQUIREMENT_NETWORK_OPEN } -> RouteVerdict.ALL_SURFACES_GATED
+            tested.isNotEmpty() && untested.isEmpty() &&
+                tested.all { it.status == RouteStatus.PLATFORM_GATE && it.gateCause == GateCause.CHECK_ADDRESS_REACHABLE } -> RouteVerdict.ALL_SURFACES_GATED
             tested.isNotEmpty() -> RouteVerdict.NO_WORKING_ROUTE
             surfaces.any { it.status == RouteStatus.PREVIOUS_SESSION } || olderContexts > 0 -> RouteVerdict.NEEDS_REVERIFICATION
             else -> RouteVerdict.NOT_TESTED
         }
-        val untested = AccessSurface.entries.filter { s -> surfaces.none { it.surface == s } }
-        return RouteDecision(platformId, action, verdict, recommended, surfaces, explain(verdict, recommended, surfaces, untested, action))
+        return RouteDecision(platformId, action, verdict, recommended, surfaces, explain(verdict, recommended, surfaces, untested, action), untested)
     }
 
     private fun rank(s: RouteStatus) = when (s) {
@@ -214,31 +307,33 @@ object AccessRoutes {
             RouteOutcome.UNSURE -> RouteStatus.UNSURE
         }
         val cause = if (status != RouteStatus.PLATFORM_GATE) null else when (last.networkAtReport) {
-            "PASS" -> GateCause.SERVER_REQUIREMENT_NETWORK_OPEN
-            "FAIL", "UNKNOWN" -> GateCause.NETWORK_PROBLEM_SUSPECTED
+            "PASS" -> GateCause.CHECK_ADDRESS_REACHABLE
+            "FAIL" -> GateCause.NETWORK_PROBLEM_SUSPECTED
+            "UNKNOWN" -> GateCause.NETWORK_UNCERTAIN
             else -> GateCause.NETWORK_NOT_MEASURED
         }
         return SurfaceAssessment(surface, browser, status, counted.size, last.atMs, last.account, cause, last.routePath)
     }
 
     private fun explain(v: RouteVerdict, rec: SurfaceAssessment?, all: List<SurfaceAssessment>, untested: List<AccessSurface>, action: AccessAction): String {
-        val untestedText = if (untested.isEmpty()) "" else " Denenmemiş yüzey: ${untested.joinToString { it.label }}."
+        val untestedText = if (untested.isEmpty()) "" else " Henüz denenmeyen yol: ${untested.joinToString { it.label }}."
         val identity = rec?.account?.let { if (it == AccountContext.LOGGED_OUT) " (girişsiz; hesabın değil)" else "" }.orEmpty()
         return when (v) {
-            RouteVerdict.VERIFIED_ROUTE -> "${rec!!.surface.label}$identity bu ağda ve bu profille ${rec.confirmations} ayrı onayla çalışıyor."
-            RouteVerdict.TENTATIVE_ROUTE -> "${rec!!.surface.label}$identity: " + (if (rec.status == RouteStatus.PARTIAL) "kısmen çalışıyor." else
-                "tek onay var; farklı bir zamanda (en az 10 dk sonra), uygulamayı yeniden başlatıp yeni bir içerikle tekrar onayla.") +
+            RouteVerdict.VERIFIED_ROUTE -> "${rec!!.surface.label}$identity bu ağda ve bu ayarla ${rec.confirmations} ayrı bildirimle çalıştı."
+            RouteVerdict.TENTATIVE_ROUTE -> "${rec!!.surface.label}$identity: " + (if (rec.status == RouteStatus.PARTIAL) "kısmen çalıştı." else
+                "ilk denemede çalıştı. İstersen en az 10 dakika sonra, uygulamayı yeniden başlatıp yeni bir içerikle bir kez daha kontrol edebilirsin.") +
                 if (action.needsAccount && rec.account != AccountContext.SAME_ACCOUNT_CONFIRMED) " Kendi hesabınla açık olduğunu teyit etmedin." else ""
-            RouteVerdict.ALL_SURFACES_GATED -> "Denenen bütün resmî yüzeylerde ağ yolu açıkken platform doğrulama istedi. Bu bir sunucu/hesap şartıdır; " +
-                "yerel DNS/DPI ayarı ve yüzey değiştirmek bunu çözmez.$untestedText"
+            RouteVerdict.ALL_SURFACES_GATED -> "Desteklenen bütün resmî yollarda (uygulama ve tarayıcı) platform doğrulama istedi; o sırada kontrol adresine ulaşılabiliyordu. " +
+                "Bu büyük olasılıkla platformun hesap şartıdır ve yerel bağlantı ayarı bunu değiştiremez. Kontrol adresi platformun bütün sunucularını kapsamadığı için kesin değildir."
             RouteVerdict.NO_WORKING_ROUTE -> buildString {
-                append("Bu işlem için çalışan bir yüzey bildirilmedi.")
+                append("Bu işlem için çalışan bir yol bildirilmedi.")
                 if (all.any { it.gateCause == GateCause.NETWORK_PROBLEM_SUSPECTED })
-                    append(" Doğrulama/yükleme ekranı görüldüğü anda ağ yolu kapalıydı: önce ağ yolunu düzelt (Ortak yöntem ara), sonra aynı işlemi yeniden dene.")
-                if (all.any { it.gateCause == GateCause.NETWORK_NOT_MEASURED }) append(" Doğrulama anında ağ ölçülemedi; ağ mı sunucu şartı mı belirsiz.")
+                    append(" Doğrulama/yükleme ekranı görüldüğü anda bağlantı hatası ölçüldü: önce bağlantı yöntemlerini dene, sonra aynı işlemi yeniden kontrol et.")
+                if (all.any { it.gateCause == GateCause.NETWORK_UNCERTAIN }) append(" Doğrulama anındaki ağ ölçümü sonuçsuz kaldı; sebep ağ mı platform mu belli değil.")
+                if (all.any { it.gateCause == GateCause.NETWORK_NOT_MEASURED }) append(" Doğrulama anında ağ ölçülemedi; sebep ağ mı platform mu belli değil.")
                 append(untestedText)
             }
-            RouteVerdict.NEEDS_REVERIFICATION -> "Önceki bildirimler başka bir ağda, profilde ya da uygulama oturumunda alındı; bu bağlamda yeniden kontrol gerekiyor."
+            RouteVerdict.NEEDS_REVERIFICATION -> "Önceki bildirimler başka bir ağda, ayarda ya da uygulama oturumunda alındı; burada yeniden kontrol gerekiyor."
             RouteVerdict.NOT_TESTED -> "Henüz denenmedi."
         }
     }
