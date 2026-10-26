@@ -82,6 +82,8 @@ data class DeviceApps(
     val packages: Map<String, String?> = emptyMap(),
     val browsers: List<AccessLauncher.Browser> = emptyList(),
     val defaultBrowser: String? = null,
+    /** Cihazda etkin bir VPN ağı var mı (bizimki dahil; bağlıyken ayrıca elenir). */
+    val vpnPresent: Boolean = false,
 ) {
     fun browserLabel(pkg: String?): String? = browsers.firstOrNull { it.packageName == pkg }?.label
     fun hasBrowser(pkg: String?): Boolean = pkg != null && browsers.any { it.packageName == pkg }
@@ -92,6 +94,7 @@ data class DeviceApps(
             packages = SocialPlatform.catalog.associate { it.id to AccessLauncher.installedPackage(context, it) },
             browsers = AccessLauncher.browsers(context),
             defaultBrowser = AccessLauncher.defaultBrowser(context),
+            vpnPresent = SocialAccessRuntime.otherVpnActive(ownConnected = false),
         )
     }
 }
@@ -134,8 +137,8 @@ fun SocialGuideScreen(
         guide.onEnter()
     }
 
-    val ui = GuideUi(context, guide, gs, trial, settings, connection, failure, denied, routeCtx?.let { it }, ledger, device, viewModel,
-        onClose, onOpenHome, onOpenAdvanced, onOpenDiagnostics, onConnect, onHelp = { help = true })
+    val ui = GuideUi(context, guide, gs, trial, settings, connection, failure, denied, routeCtx, ledger, device, viewModel,
+        onClose, onOpenHome, onOpenAdvanced, onOpenDiagnostics, onConnect, onHelp = { help = true }, onRefresh = { resumes++ })
 
     val back: () -> Unit = {
         if (gs.step == GuideStep.SESSION && SocialAccessRuntime.coordinator.active()) leaving = true
@@ -211,6 +214,8 @@ internal class GuideUi(
     val onOpenDiagnostics: () -> Unit,
     val onConnect: () -> Unit,
     val onHelp: () -> Unit,
+    /** Ağ/paket durumunu yeniden okur (ör. internet geldi mi). Test başlatmaz. */
+    val onRefresh: () -> Unit = {},
 ) {
     val a = gs.answers
     val platform: SocialPlatform? = SocialPlatform.byId(a.primary)
@@ -242,7 +247,7 @@ internal class GuideUi(
 
     fun issues(): List<PrepIssue> = GuideFlow.prepIssues(
         networkUsable = networkUsable, connection = connection, permissionDenied = permissionDenied,
-        otherVpn = SocialAccessRuntime.otherVpnActive(engineConnected), connectFailed = connection == ConnectionState.Failed,
+        otherVpn = device.vpnPresent && !engineConnected, connectFailed = connection == ConnectionState.Failed,
         includeListEmpty = includeEmpty && !GuideFlow.routeCheckOnly(a), primaryOutOfScope = outOfScope && !GuideFlow.routeCheckOnly(a),
         needsBrowser = needsBrowser, browserAvailable = device.browsers.isNotEmpty() || !device.loaded,
         needsEngine = !GuideFlow.routeCheckOnly(a),
@@ -516,7 +521,7 @@ internal fun GuideUi.PickProblem(back: () -> Unit) {
 
 /** Denetleyicinin GÜNCEL durumuyla (aynı karede yazılan cevap dahil) yeni bir görünüm. */
 internal fun GuideUi.fresh(settingsOverride: Settings = settings) = GuideUi(context, guide, guide.state.value, trial, settingsOverride, connection,
-    failure, permissionDenied, routeCtx, ledger, device, viewModel, onClose, onOpenHome, onOpenAdvanced, onOpenDiagnostics, onConnect, onHelp)
+    failure, permissionDenied, routeCtx, ledger, device, viewModel, onClose, onOpenHome, onOpenAdvanced, onOpenDiagnostics, onConnect, onHelp, onRefresh)
 
 /** Seçim yazıldıktan HEMEN sonra sıradaki adım: cevap tekrar okunarak karar verilir. */
 private fun GuideUi.continueAfter(problem: GuideProblem) {
@@ -531,9 +536,9 @@ internal fun GuideUi.Prepare(back: () -> Unit) {
     when (issue) {
         null -> GuidePage(GuideStage.PREPARATION, "Bağlantı hazır", "Şimdi $name kontrol edilebilir.", back, onClose, onHelp,
             primary = GuideAction("$cap kontrol et", { continueSetup() }, tag = "prepare-continue"))
-        PrepIssue.NO_INTERNET -> GuidePage(GuideStage.PREPARATION, "İnternet bağlantısı yok", "Wi-Fi ya da mobil veriyi açınca bu sayfa kendiliğinden güncellenir.", back, onClose, onHelp,
+        PrepIssue.NO_INTERNET -> GuidePage(GuideStage.PREPARATION, "İnternet bağlantısı yok", "Wi-Fi ya da mobil veriyi açıp buraya dön.", back, onClose, onHelp,
             primary = GuideAction("Ağ ayarlarını aç", { runCatching { context.startActivity(Intent(AndroidSettings.ACTION_WIRELESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } }),
-            secondary = listOf(GuideAction("Şimdilik çık", onClose)))
+            secondary = listOf(GuideAction("Tekrar dene", onRefresh, tag = "prepare-refresh"), GuideAction("Şimdilik çık", onClose)))
         PrepIssue.NO_BROWSER -> GuidePage(GuideStage.PREPARATION, "Tarayıcı bulunamadı", "$name kurulu değil ve açabilecek bir tarayıcı yok. Kendiliğinden bir şey indirmiyoruz.", back, onClose, onHelp,
             primary = GuideAction("Başka uygulama seç", { guide.go(GuideStep.PICK_APP) }))
         PrepIssue.ENGINE_OFF, PrepIssue.OTHER_VPN -> GuidePage(GuideStage.PREPARATION, if (issue == PrepIssue.OTHER_VPN) "Başka bir VPN açık" else "Bağlantıyı hazırla",

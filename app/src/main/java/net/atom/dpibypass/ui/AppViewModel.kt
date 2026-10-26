@@ -137,6 +137,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app), net.atom.dpibypass
     init {
         net.atom.dpibypass.social.SocialAccessRuntime.initialize(app)
         net.atom.dpibypass.ui.social.SocialGuideHost.attach(this)
+        // Bağlam akışı hemen başlasın: rehber ilk açılışı okurken null görmesin.
+        routeContext.value
         refreshNetwork()
         // Sosyal Erişim açık/kapalı durumu, kaydedilmiş GERÇEK değerden izlenir.
         // `settings` StateFlow'u DataStore okunana kadar varsayılan `Settings()`

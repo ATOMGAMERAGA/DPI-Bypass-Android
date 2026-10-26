@@ -339,7 +339,7 @@ private fun AccountAgeQuestion(p: SocialPlatform, age: AccountAge) {
         }
         if (failed) Text("Kaydedilemedi; tekrar dene.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         AccessRoutes.transitionNote(age, AccessRoutes.today(System.currentTimeMillis()))?.let {
-            Text("$it (Kaynak 26.10.2026'da okundu; uygulama her platformda farklı olabilir.)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$it (Kaynak: ${AccessRoutes.REGULATION_SOURCE}; bu sürümde yeniden doğrulanamadı. Platformların uygulaması farklı olabilir.)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

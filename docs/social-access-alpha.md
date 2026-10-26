@@ -1,8 +1,133 @@
 # Sosyal Erişim Deneyleri — Alpha (Android)
 
-> **Güncel davranış: 26 Ekim 2026 revizyonu aşağıdadır.** Daha eski bölümler (23, 22, 18, 17 Ekim) tarihsel kayıttır; çeliştikleri yerde bu revizyon geçerlidir. Bu revizyonda da **gerçek cihaz/operatör doğrulaması yoktur** (bkz. "Ana hedef değerlendirmesi").
+> **Güncel davranış: "Revizyon — 26 Ekim 2026 (2): adım adım rehber" aşağıdadır.** Eski tek sayfalık ekranı (Durum · Uygulamalar · Erişim yolu kartı · Seçenekler · Başlat · Deneme · Tanılama) anlatan bölümler tarihsel kayıttır; o ekrandaki düğmeler artık yoktur, karşılıkları aşağıdaki eşleme tablosundadır. Bu revizyonda da **gerçek cihaz/operatör/hesap doğrulaması yoktur**.
 
-## Revizyon — 26 Ekim 2026 (temel: `5488ab9`, v2.4.1)
+## Revizyon — 26 Ekim 2026 (2): adım adım rehber (temel: `224e048`, PR #17 merge)
+
+### 1. Nasıl kullanılır (güncel)
+
+Ayarlar → **"Bir uygulama açılmıyor mu?"** satırı rehberi açar. Her sayfada tek soru ya da tek görev, üstte **Hazırlık · Kontrol · Sonuç** göstergesi vardır (koşullu akışta sabit "3/8" sayacı kullanılmaz). Geri tuşu/hareketi ve sayfadaki geri oku aynı işi yapar: cevaplar silinmez, yeni test başlamaz.
+
+1. **Karşılama** — ilk açılışta "Başlayalım" (Sosyal Erişim kapalıysa açar). Kayıtlı çalışan ayar varsa kısa özet + **"Instagram'ı aç"** + "Sorun yaşıyorum". Yarım kalan akış varsa **"Kaldığın yerden devam et"** (motor durumu yeniden okunur; eski test tekrar çalıştırılmaz).
+2. **Hangi uygulama açılmıyor?** — kurulu olanlar önce; kurulu değilse "tarayıcıda denenebilir" yazar (hiçbir şey indirilmez). "Listede yok / site adresi gireceğim" ayrı sayfaya gider (özel alan adı, paylaşım bağlantısı, platform algılama).
+3. **Ne yapmak istiyorsun?** — platformun desteklediği işlemler (içerik, video, hesabım, mesajlaşma, paylaşım, sesli görüşme) + "Emin değilim, genel kontrol yap". Seçim gerçek `Goal.requiredCapabilities`'e çevrilir (`AccessAction.capability`); eski `PLAY_MEDIA`/`VIEW_SELECTED_CONTENT` ikiliği yoktur.
+4. **Belirli bir içerik mi?** — yalnız içerik/video işleminde; isteğe bağlı. Başka platforma ait bağlantı sessizce test edilmez.
+5. **Sorun ne?** — Hiç açılmıyor / video yüklenmiyor / çok yavaş / giriş-doğrulama / emin değilim. "Giriş veya doğrulama" yerel profilleri döndürmez: önce yollar kontrol edilir.
+6. **Bağlantıyı hazırla** (yalnız gerekiyorsa) — internet yok, VPN izni, izin reddi, başka VPN, bağlantı kurulamadı, kapsam dışı uygulama, boş "yalnızca seçili" listesi, tarayıcı yok: her biri ayrı sayfa ve tek düzeltme eylemi. Android'in gerçek izin penceresi açılır; dönüşte aynı rehbere gelinir.
+7. **Tarayıcı** (yalnız web yoluna geçilince ve geçerli kayıtlı tercih yoksa).
+8. **Şu anda çalışıyor mu?** (yalnız "Emin değilim" dendiyse) — "Evet" ise "Şu anda çalışıyor" sonucu; başarı yazılmaz.
+9. **Nasıl deneyelim?** — "Otomatik kontrol (Beta)" ya da "Adım adım kendim deneyeceğim"; mevcut tercih sessizce değişmez. "Başka uygulamalar da sorunsuz kalsın" buradan (ve işlem sayfasından) açılır.
+10. **Mobil veride ek veri?** (yalnız otomatik + herkese açık belirli içerik + ölçülü ağ).
+11. **Deneme** — sayfa motorun GERÇEK durumundan türetilir: "Şu anki durum ölçülüyor / Yöntem uygulanıyor / Bağlantı yolları kontrol ediliyor" (sahte yüzde/süre yok), "Durdur" her zaman görünür.
+12. **Şimdi Instagram'da dene** — tek görev; ana düğme "Instagram'ı aç" (resmî paket) ya da "Instagram · <tarayıcı> ile aç" (o paket). Mesaj/paylaşım/arama kullanıcının kendi eylemidir. Açılamazsa test kaydı düşülmez.
+13. **Instagram'da ne oldu?** — Çalıştı / Bir kısmı çalıştı / Çalışmadı / Doğrulama istedi / Test edemedim·Emin değilim. Hesap işleminde ayrı soru: **"Kendi hesabın açık mıydı?"**. Tekrar kontrolde ayrı soru: **"Uygulamayı yeniden başlatıp yeni içerik denedin mi?"** (kullanıcı adına işaretlenmez).
+14. **Sonuç** — "Instagram'da video çalıştı." + "Senin bildirimin" + "İlk denemede çalıştı"/"Ayrı zamanlarda doğrulandı"; **"Bu ayarla devam et"** → karşılamada "Instagram'ı aç". İsteğe bağlı kısa tekrar kontrol en erken ilk bildirimden 10 dk sonra açılır (arka planda sayaç çalışmaz).
+
+Gelişmiş ayarlar ve Tanılama ayrı sayfalardır; rehberden/yardımdan açılır, geri dönmek akışı ve cevapları korur.
+
+### 2. Sayfa ve dal haritası
+
+```
+Karşılama ─┬─ (kayıt var) Uygulamayı aç │ Sorun yaşıyorum → İşlem
+           ├─ (yarım) Kaldığın yerden devam et │ Baştan başla
+           └─ Başlayalım → Uygulama ─┬─ Listede yok → Site adresi ─(başka platform)→ o platform
+                                     └─ İşlem ─(içerik/video)→ Bağlantı? → Sorun
+Sorun ─→ [Hazırla: ağ yok│izin│ret│başka VPN│kurulamadı│kapsam│boş liste│tarayıcı yok] → [Tarayıcı] →
+        ├─ (doğrulama) Yol kontrolü: Şimdi dene → Ne oldu → [Hesap?] → Sonuç
+        └─ [Şu an çalışıyor mu?] → Nasıl deneyelim → [Ek veri?] → Deneme
+Deneme (motor durumundan) ─┬─ Çalışıyor (Durdur · Adım adım · Açıldı, burada dur)
+   ├─ Test penceresi (oynat'a dokun → devam)          ├─ Şimdi dene → Ne oldu → [Hesap?] → (motor)
+   ├─ Kısmi: Böyle kullan │ Diğer yolu dene           ├─ Duraklatıldı: bekleme│bütçe│bağlantı gerekli│test edilemedi│
+   ├─ Bağlantın değişti → Kontrolü tekrarla           │                yanıt yok│ağ değişti│internet yok│kalıcılaştırılamadı
+   ├─ Kurtarma → Geri almayı yeniden dene             └─ Yarıda kaldı → Aynı cevaplarla yeniden başlat
+   └─ Sonuç: çalıştı │ kısmi │ çalışmadı (sıradaki yöntem / tarayıcıda dene) │ doğrulama (tarayıcıda da kontrol et /
+             bağlantı yöntemlerini dene) │ şu an çalışıyor │ bulunamadı │ otomatik karar veremedi (adım adım) │ durduruldu
+```
+
+### 3. Eski özellik → yeni yer → nasıl doğrulandı
+
+Kanıt: **J** = JVM testi (gerçek `ExperimentCoordinator` + sözleşmeyi izleyen motor taklidi), **U** = Robolectric Compose arayüz testi, **G** = Robolectric ekran görüntüsü (sayfa çizildi), **S** = statik inceleme, **C** = cihaz (yok).
+
+| Eski yetenek | Yeni yer | Doğrulama |
+|---|---|---|
+| Çoklu platform / ortak plan, gerileme kontrolü | Uygulama + "Başka uygulamalar da sorunsuz kalsın" sayfası; Gelişmiş → Uygulamalar; motor değişmedi | J `MultiTargetTest` (mevcut), S |
+| Odak uygulama | Açık birincil seçim (`socialPrimaryPlatform`); enum sırasından çıkarılmaz | U `firstRunIsOneQuestionPerPage…`, S |
+| Özel alan adı, paylaşım linki, platform algılama | "Listede yok / site adresi" ve "Belirli bir içerik mi?" sayfaları; başka platform bağlantısında "X olarak devam et" | J `genuinelyDifferentPlatformLinkIsNotSilentlyTested` |
+| Manuel + Otomatik Beta | "Nasıl deneyelim?"; deneme sürerken "Adım adım kendim deneyeceğim"; otomatik karar veremezse "Adım adım devam et"; Gelişmiş → kip | J `firstRunAutoFlow…`, `manualFailureRollsBack…` |
+| Resmî uygulama / web ve tarayıcı seçimi | "Şimdi dene" (uygulama ya da açık tarayıcı paketi), "Başka tarayıcı seç", Tarayıcı sayfası, Gelişmiş → Tarayıcı | J `browserEvidenceStaysWithItsBrowser`, `missingAppUsesExplicitWeb…`, U `missingAppShowsVisibleFix…` |
+| Anonim kontrollü WebView ve medya gözlemi | Yalnız otomatik + herkese açık belirli içerik dalında "Test penceresinde bakılıyor"; "Bende hâlâ sorun var" | J `controlledWindowAndMeteredQuestionAreConditional`, mevcut `SocialCoordinatorTest`, G |
+| Ölçülü ağda ek veri izni | "Mobil veride ek veri kullanılsın mı?" (yalnız gerekince; "Hayır" ile sürer) | J (aynı test) |
+| Başlangıç ölçümü / feedback / report / route ledger | Tek "Ne oldu?" bildirimi → yol kaydı + (deneme içindeyse) geri bildirim ya da (tur dışında) hedef raporu; tek kez | J `doubleTapsProduceSingleTrialAndSingleReport`, `firstRunAutoFlow…` |
+| Aynı hesap, yeni içerik/yeniden başlatma, tekrar teyidi | "Kendi hesabın açık mıydı?" ve tekrar kontrolde "yeniden başlattın mı?" ayrı sorular; ≥10 dk kuralı korunur | J `accountActionWithoutSameAccount…`, `reverifyNeedsGapAndUserDeclaredFreshStart`, mevcut `AccessRoutesTest` |
+| Hesap açılış dönemi | Gelişmiş → "<platform> · işlem bazında yollar" altında isteğe bağlı; ilk kurulumu engellemez | S, mevcut `AccessRoutesTest.transitionNote…` |
+| Planı koruma, ana ayar yapma, planı kaldırma | Sonuç → "Bu ayarla devam et", "Bu ayarı ana bağlantı ayarım da yap"; Gelişmiş → Plan (kaldırma onaylı, etkisi yazılı) | J `stopClearPlanDisableAndLeaveAreDistinct` |
+| Duraklat/devam, bütçe, cooldown, kurtarma | Duraklatıldı sayfaları (neden başına tek eylem), Kurtarma sayfası | J `startBlockedByCooldownIsShownNotHung`, `keepFailureDoesNotHangInPreparing`, mevcut `BudgetAndWaitRegressionTest`, G |
+| Paket kapsamı, DNS/QUIC/Vodafone | "Bağlantıyı hazırla" kapsam düzeltmesi (yalnız ilgili paket eklenir); Gelişmiş → Bağlantı ayarları / Uygulama filtresi / önceki filtreyi geri yükle | J `preparationIssuesNeverLookReady`, mevcut `PlanAndScopeTest` |
+| Seçilileri şimdi kontrol et, hedef başına durum, çakışma | Gelişmiş → Uygulamalar | S |
+| Tanılama önizle/dışa aktar, geçmiş temizle | Tanılama sayfası (dışa aktarma hedefi açılamazsa başarı denmez; silme onaylı, kurtarma/bekleme/plan korunur) | S, mevcut `AccessRoutesTest.diagnosticExportIsMasked` |
+| "Nasıl çalışır?" | Rehberde "?" yardım | G |
+
+### 4. Son merge'deki inceleme noktaları (statik bulgu → yeniden üretim → düzeltme)
+
+| # | Bulgu | Durum |
+|---|---|---|
+| 1 | Önerilen web yolu, kanıtın alındığı değil SEÇİLİ tarayıcıyı açıyordu | `AccessRoutes.launchFor`: kanıt yalnız kendi tarayıcısında; tarayıcı yoksa "yeniden kontrol" (J) |
+| 2 | Hedefli açılış başarısızsa hedefsiz `ACTION_VIEW` (App Links → uygulama) | Kaldırıldı; `AccessLauncher.open` yüzey dışına düşmez, sayfada hata + tek düzeltme (U, S) |
+| 3 | Tek yüzey denenmişken "bütün yollar" sonucu | `decide` desteklenen yüzeyleri (`surfaces`) ve `untested` listesini kullanır; desteklenmeyen web işlemi kaydedilmez (J) |
+| 4 | Kontrol adresine ulaşmak "kesin sunucu şartı", UNKNOWN "kesin ağ arızası" diye sunuluyordu | `GateCause`: `CHECK_ADDRESS_REACHABLE`, `NETWORK_PROBLEM_SUSPECTED` (yalnız FAIL), `NETWORK_UNCERTAIN`, `NETWORK_NOT_MEASURED`; metinler "büyük olasılıkla / belli değil" (J) |
+| 5 | Ayrı feedback/report/recordRoute düğmeleri; çift kayıt | Tek bildirim planı (`GuideFlow.plan`), gönderilmiş kimlik kümesi, motor kabulü dönüş değeri (J) |
+| 6 | Bağlam yalnız coroutine başında karşılaştırılıyordu | `AccessRoutes.record`/`commit`: ölçüm öncesi ve KABUL ANINDA; motor geri bildirimi aynı anlık görüntüyle (J `contextChangeDuringMeasurement…`) |
+| 7 | Kapat/geri/özelliği kapat/planı kaldır karışıyordu | Rehberden çıkmak hiçbir şeyi durdurmaz; "Durdur" geçici denemeyi geri alır; özelliği kapatmak planı korur (onay penceresinde yazılı); "Planı kaldır" onaylı (J) |
+| 8 | Kayıt/I-O hatası "ağ değişti" diye gösteriliyordu | `RouteSave.WriteFailed` ayrı; "Kaydı tekrar dene" yalnız kaydı ve yalnız açılış bağlamına yazar; okunamayan dosya yedeklenemezse üzerine yazılmaz (J) |
+| + | Kalıcılaştırma (commit) başarısız olunca tur SELECTING'de asılı kalıyordu (sonsuz "hazırlanıyor") | `KEEP_FAILED` duraklaması, aday kuyruğa döner (J `keepFailureDoesNotHangInPreparing`) |
+| + | Deneme sırasında alınan bildirim, aynı ayar kalıcılaşınca bayatlıyordu (bağlam motorun gerçek ayarını değil plan defterini içeriyordu) | `RouteContexts.of`: deneme sırasında adayın ayarı, plan defteri profile girmez (J) |
+
+### 5. Yaşam döngüsü
+
+- Rehber durumu süreç kapsamlıdır (`SocialGuideHost`) ve `noBackupFilesDir/social-guide.json`'a yazılır: ekrandan çıkmak/başka sekmeye gitmek cevapları ve süren testi kaybettirmez.
+- Süreç ölümü: cevaplar geri gelir; bekleyen dış testin süreç kimliği uyuşmadığı için rapor alınmaz ("Bağlantın değişti → Kontrolü tekrarla"); eski deneme yoksa "Deneme yarıda kaldı → Aynı cevaplarla yeniden başlat". Eski PASS diriltilmez (J `processDeathRestoresAnswersButNotPendingPass`).
+- Döndürme: Activity `configChanges` ile yeniden yaratılmaz; durum zaten süreç kapsamlıdır.
+- Yan etkiler kompozisyonda başlamaz; denetleyici niyetleri tek sahipli (`starting`/`stopping`/`acting` bayrakları, gönderilmiş bildirim kimlikleri).
+- Kayıt şeması: rehber durumu `schema=1` (bilinmeyen/bozuk → karşılama). Yol kaydı şeması değişmedi; eski kayıtların bağlam anahtarında `plan=` bulunduğu için güncellemeden sonra "yeniden kontrol gerekiyor" görünürler (zaten süreç kimliğine bağlıydılar).
+
+### 6. Doğrulama kaydı — bu revizyon
+
+Bu ortam: Linux x86_64 bulut konteyneri, JDK 21 (Gradle hedefi 17), Android SDK 35 / build-tools 35.0.0 / NDK 26.3.11579264, Node 22. **Bağlı cihaz yok, `/dev/kvm` yok** (emülatör çalıştırılamadı). Gerçek One UI / API / WebView sürümü test ortamından **tespit edilemedi**; Robolectric arayüz testleri SDK 34 taklidinde koştu.
+
+| Eksen | Komut | Sonuç |
+|---|---|---|
+| Başlangıç (temel `224e048`, değişiklik öncesi) | `./gradlew testDebugUnitTest lintDebug assembleDebug` | 140/140 JVM testi geçti; lint **2 hata** (`WrongConstant` `DpiTileService.kt:100`, `ProduceStateDoesNotAssignValue` `AppsScreen.kt:393`), 25 uyarı; debug APK üretildi |
+| Derleme | `./gradlew clean testDebugUnitTest lintDebug assembleDebug` | BUILD SUCCESSFUL |
+| JVM (birim + motorla bütünleşik rehber) | aynı | **169/169** geçti (0 atlanan); yeni: `SocialGuideTest` 24 test |
+| Arayüz (Robolectric Compose, JVM) | aynı | `SocialGuideUiTest` 4/4, `SocialGuideScreenshotTest` 1/1 (21 sayfa görüntüsü: `app/build/outputs/guide-screenshots`) |
+| Lint | `lintDebug` (rapordaki sayı okundu; `abortOnError=false`'a güvenilmedi) | **0 hata**, 28 uyarı (25 eski + 3 yeni test bağımlılığı sürüm uyarısı). İki eski hata kök nedeninden düzeltildi: kutucuk `PendingIntentActivityWrapper`'a `FLAG_IMMUTABLE` verilmez (değişmezliği `isMutable=false` ekler); anahtarlı `produceState` aşırı yüklemesinde lint'in atamayı görmediği yanlış pozitif → `remember` + `LaunchedEffect`. Bastırma eklenmedi |
+| JavaScript gözlemci | `node --test tests/observer.test.cjs` | 8/8 geçti |
+| Cihaz (enstrümantasyon) | `./gradlew connectedDebugAndroidTest` | **NOT_RUN** — `DeviceException: No connected devices!`. `SocialGuideDeviceTest` derleniyor ama hiç koşmadı |
+| Saha (S24 Ultra, operatör, gerçek hesap) | — | **FIELD_UNVERIFIED** — aşağıdaki 5 dakikalık listeyle kullanıcı tarafından yapılmalı |
+
+Bu revizyondaki mutasyon kontrolü: bekleyen testin bağlam kontrolü, çift gönderim koruması, "denenmemiş yüzey varken bütün yollar yok" ve kabul anı bağlam kontrolü tek tek bozulduğunda ilgili `SocialGuideTest` testleri kırmızıya döndü; geri alınınca yeşil.
+
+Mevzuat notu (Gelişmiş ayarlar → hesap açılış dönemi): Resmî Gazete sayfasına bu ortamdan erişilemedi (zaman aşımı); not "bu sürümde yeniden doğrulanamadı" etiketiyle gösterilir ve ana akışta yer almaz.
+
+APK (kurulabilir **debug/test** APK; release anahtarı bu ortamda yok):
+- Paket `net.atom.dpibypass.debug`, sürüm `2.4.1-debug` (versionCode 20401), minSdk 26, targetSdk 35
+- İmza: **Android Debug** sertifikası (v2 şeması). Mevcut release kurulumunun üzerine güncelleme olarak kurulamaz; yan yana ayrı paket olarak kurulur. Veri silmek varsayılan çözüm değildir.
+- ABI: arm64-v8a, armeabi-v7a, x86_64; arm64-v8a içinde `libbyedpi.so`, `libhev-socks5-tunnel.so`, `libandroidx.graphics.path.so`, `libdatastore_shared_counter.so` bulunduğu `unzip -l` ile doğrulandı
+- SHA-256 ve indirme: CI çalıştırmasının `app-debug` artifact'ı (aynı kaynaktan yeniden üretilir; yerel derlemenin özeti PR açıklamasındadır)
+
+### 7. S24 Ultra — 5 dakikalık saha kabul listesi (kullanıcı tarafından; yapılmadı)
+
+Her satır için sonucu ✔ / ✘ / NOT_RUN olarak not et. Hesap ve içerik bilgisi paylaşma.
+
+1. Kurulum (≤1 dk): APK'yi kur (debug imzalı; mevcut kurulumla imza farklıysa güncelleme kurulmayabilir — veriyi silmek varsayılan çözüm değildir, önce sor). Ayarlar → "Bir uygulama açılmıyor mu?" → Başlayalım.
+2. Seçim (≤1 dk): Instagram → "Video izlemek" → bağlantısız → "Açılıyor ama video yüklenmiyor". Geri oku ile bir adım dön: seçimlerin duruyor mu?
+3. İzin (≤30 sn): "Bağlantıyı hazırla" → sistem penceresi. Bir kez **Reddet** → "İzin verilmedi" sayfası mı? "Tekrar dene" → İzin ver → rehbere geri dönüldü mü?
+4. Deneme (≤1,5 dk): "Adım adım kendim deneyeceğim" → "Yöntemleri dene" → "Instagram'ı aç" gerçekten Instagram'ı mı açtı? Video oynat → geri dön → "Ne oldu?" sayfası geldi mi (başa atmadan)? Cevapla → sonuç sayfası ve "Bu ayarla devam et".
+5. Ağ değişimi (≤1 dk): Karşılamada "Instagram'ı aç" çalışıyor mu? Wi-Fi'ı kapatıp mobil veriye geç, rehberi aç: "Ağın değişti" notu / yeniden kontrol isteniyor mu? Bir test açıkken ağı değiştirip dönünce "Bağlantın değişti → Kontrolü tekrarla" görünüyor mu (sonuç yazılmadan)?
+
+## Revizyon — 26 Ekim 2026 (1) (temel: `5488ab9`, v2.4.1) — tarihsel
+
+> Bu bölümdeki "Sosyal Erişim → Erişim yolu kartı", "Bildirimi kaydet", "Bu yolla aç" gibi düğmeler eski tek sayfalık ekrana aittir ve artık yoktur; karşılıkları yukarıdaki eşleme tablosundadır.
 
 ### 1. Kaynak araştırması: yaş doğrulama yönetmeliği
 

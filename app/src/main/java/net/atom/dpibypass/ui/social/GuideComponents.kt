@@ -42,12 +42,14 @@ import androidx.compose.material.icons.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -61,6 +63,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -99,6 +102,9 @@ fun GuidePage(
     secondary: List<GuideAction> = emptyList(),
     content: @Composable ColumnScope.() -> Unit = {},
 ) {
+    // Üst çubuk simgeleri bir Surface içinde değil: içerik rengi açıkça verilir, yoksa
+    // koyu temada siyah zemin üstünde siyah çizilirler.
+    CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
     Column(
         Modifier
             .fillMaxSize()
@@ -150,12 +156,20 @@ fun GuidePage(
             }
         }
     }
+    }
 }
 
 /** Hazırlık · Kontrol · Sonuç. Koşullu akışta yanlış "3/8" sayacı üretmez. */
 @Composable
 fun StageIndicator(stage: GuideStage, modifier: Modifier = Modifier) {
     val all = GuideStage.entries
+    // Büyük yazıda üç etiket dar ekrana sığmaz: yalnız geçerli aşama ve sırası gösterilir.
+    if (LocalDensity.current.fontScale > 1.25f) {
+        Text("${stage.label} · ${stage.ordinal + 1}/${all.size}", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary, maxLines = 1, textAlign = TextAlign.Center,
+            modifier = modifier.clearAndSetSemantics { contentDescription = "Aşama ${stage.ordinal + 1}/${all.size}: ${stage.label}" })
+        return
+    }
     Row(
         modifier.clearAndSetSemantics { contentDescription = "Aşama ${stage.ordinal + 1}/${all.size}: ${stage.label}" },
         horizontalArrangement = Arrangement.Center,

@@ -58,7 +58,16 @@ internal fun GuideUi.Session(back: () -> Unit) {
     val details = details()
     when (view ?: SessionView.INTERRUPTED) {
         SessionView.RUNNING -> GuidePage(stage, runningTitle(), runningBody(), back, onClose, onHelp,
-            primary = GuideAction("Durdur", guide::stop, tag = "session-stop"), primaryTone = ButtonTone.Danger) {
+            primary = GuideAction("Durdur", guide::stop, tag = "session-stop"), primaryTone = ButtonTone.Danger,
+            secondary = buildList {
+                // Ölçüm sürerken kullanıcı uygulamada açıldığını gördüyse arama burada durur (motorun mevcut yolu).
+                if (trial.phase == Phase.PROBING) add(GuideAction("Uygulamada açıldı, burada dur", guide::observedWorks, tag = "running-works"))
+                // Rehber içinde kip değişimi: otomatik deneme adım adım sürer, ertelenenler sorulur.
+                if (trial.mode == net.atom.dpibypass.social.TestMode.AUTO_BETA) add(GuideAction("Adım adım kendim deneyeceğim", {
+                    viewModel.saveSocialModeOnly(net.atom.dpibypass.social.TestMode.MANUAL)
+                    guide.engineAction { manual() }
+                }, tag = "running-manual"))
+            }) {
             Working(if (trial.attempted > 0) "${trial.attempted}. yöntem" else "Başlangıç")
             s.last?.takeIf { it.trialSessionId == trial.sessionId && it.outcome == RouteOutcome.NOT_WORKING }?.let {
                 Note("Önceki yöntem \"çalışmadı\" olarak kaydedildi ve geri alındı.", icon = Icons.Rounded.Info)

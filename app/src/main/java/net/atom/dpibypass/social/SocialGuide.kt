@@ -368,7 +368,7 @@ object GuideFlow {
     fun surfaceFor(session: GuideSession, trial: TrialState): PendingSurface = when (trial.candidate?.surface?.takeIf { session.kind == SessionKind.TRIAL && trial.phase == Phase.WAITING_FOR_USER }) {
         "OFFICIAL_WEB" -> PendingSurface.WEB
         "CONTROLLED_WEB_VIEW" -> PendingSurface.TEST_WINDOW
-        "OFFICIAL_NATIVE_APP" -> PendingSurface.APP
+        // Uygulama yüzeyli adayda kullanıcının açıkça seçtiği tarayıcı yolu korunur (ör. uygulama kaldırıldı).
         else -> session.surface
     }
 
