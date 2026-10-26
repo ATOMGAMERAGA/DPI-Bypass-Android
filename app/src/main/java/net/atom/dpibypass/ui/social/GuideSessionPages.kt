@@ -136,7 +136,8 @@ internal fun GuideUi.Session(back: () -> Unit) {
             secondary = listOf(GuideAction("Tanılama", onOpenDiagnostics))) { Details(details) }
 
         SessionView.INTERRUPTED -> {
-            val notStarted = s.error == "NOT_STARTED"
+            // Başlatılamayan deneme (bekleme süresi, geçersiz hedef) "yarıda kaldı" diye gösterilmez.
+            val notStarted = s.error != null && s.trialSessionId == null
             GuidePage(stage, if (notStarted) "Deneme başlatılamadı" else "Deneme yarıda kaldı",
                 if (notStarted) trial.message.ifBlank { "Bir bekleme süresi ya da kapalı bir ayar denemeyi engelledi." }.take(200)
                 else "Uygulama kapanmış ya da başka bir deneme başlamış olabilir. Eski sonuç kullanılmadı.",
