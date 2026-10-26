@@ -53,6 +53,10 @@ data class Settings(
     // isteğe bağlı belirli içerik bağlantısı. Süreç yeniden başlayınca korunur.
     val socialPlatforms: Set<String> = emptySet(),
     val socialTargetUrl: String = "",
+    // Resmî web yolunun açılacağı, kullanıcının AÇIKÇA seçtiği tarayıcı paketi
+    // (boş: sistemin varsayılan tarayıcısı). App Links'in web denemesini sessizce
+    // native uygulamaya çevirmesini önlemek için niyet bu pakete hedeflenir.
+    val socialBrowserPackage: String = "",
     // "Sadece Discord" öncesindeki uygulama kapsamı yedeği var mı? (geri alınabilir)
     val scopeBackupAvailable: Boolean = false,
     /**
@@ -143,6 +147,7 @@ class SettingsRepository(
         socialPlatforms = runCatching { this[Keys.SOCIAL_PLATFORMS] }.getOrNull()
             ?.filter { net.atom.dpibypass.social.SocialPlatform.byId(it) != null }?.toSet() ?: emptySet(),
         socialTargetUrl = runCatching { this[Keys.SOCIAL_TARGET_URL] }.getOrNull() ?: "",
+        socialBrowserPackage = runCatching { this[Keys.SOCIAL_BROWSER] }.getOrNull() ?: "",
         scopeBackupAvailable = this[Keys.SCOPE_BACKUP_MODE] != null,
         loaded = true,
     )
@@ -216,6 +221,7 @@ class SettingsRepository(
     suspend fun updateSocialPlatforms(transform: (Set<String>) -> Set<String>) =
         store.edit { it[Keys.SOCIAL_PLATFORMS] = transform(it[Keys.SOCIAL_PLATFORMS] ?: emptySet()) }
     suspend fun setSocialTargetUrl(v: String) = put(Keys.SOCIAL_TARGET_URL, v.take(2048))
+    suspend fun setSocialBrowserPackage(v: String) = put(Keys.SOCIAL_BROWSER, v.take(255))
 
     /**
      * Ağ profili: bir ağ anahtarına (taşıyıcı + ISS) o ağda KAZANMIŞ stratejiyi
@@ -268,6 +274,7 @@ class SettingsRepository(
         val SOCIAL_MODE = stringPreferencesKey("social_access_mode")
         val SOCIAL_PLATFORMS = stringSetPreferencesKey("social_access_platforms")
         val SOCIAL_TARGET_URL = stringPreferencesKey("social_access_target_url")
+        val SOCIAL_BROWSER = stringPreferencesKey("social_access_browser_package")
         val SCOPE_BACKUP_MODE = stringPreferencesKey("scope_backup_mode")
         val SCOPE_BACKUP_APPS = stringSetPreferencesKey("scope_backup_apps")
         val OPERATION_MODE = stringPreferencesKey("operation_mode")

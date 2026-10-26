@@ -162,9 +162,14 @@ class PlanAndScopeTest {
         assertEquals(TargetStatus.NO_ENGINE, TargetStatusRules.of(null, true, false, true))
         // Otomatik ağ ölçümü "çalışıyor" demez; onay bekler.
         assertEquals(TargetStatus.NETWORK_OPEN_CONFIRM, TargetStatusRules.of(net, true, true, true))
-        assertEquals(TargetStatus.WORKING, TargetStatusRules.of(net.copy(content = Check(CheckStatus.PASS, CheckSource.USER)), true, true, true))
-        assertEquals(TargetStatus.PARTIAL, TargetStatusRules.of(net.copy(content = Check(CheckStatus.PARTIAL, CheckSource.USER)), true, true, true))
-        assertEquals(TargetStatus.NOT_WORKING, TargetStatusRules.of(net.copy(content = Check(CheckStatus.FAIL, CheckSource.USER)), true, true, true))
+        // Kullanıcı bildirimi yalnız aynı bağlam kuşağında alındıysa günceldir.
+        assertEquals(TargetStatus.WORKING, TargetStatusRules.of(net.copy(content = Check(CheckStatus.PASS, CheckSource.USER), contentGeneration = 0), true, true, true))
+        assertEquals(TargetStatus.NETWORK_OPEN_CONFIRM, TargetStatusRules.of(net.copy(content = Check(CheckStatus.PASS, CheckSource.USER), contentGeneration = -1), true, true, true))
+        assertEquals(TargetStatus.PARTIAL, TargetStatusRules.of(net.copy(content = Check(CheckStatus.PARTIAL, CheckSource.USER), contentGeneration = 0), true, true, true))
+        assertEquals(TargetStatus.NOT_WORKING, TargetStatusRules.of(net.copy(content = Check(CheckStatus.FAIL, CheckSource.USER), contentGeneration = 0), true, true, true))
+        // Platform doğrulaması ağ açıkken de, bayatken de gizlenmez.
+        assertEquals(TargetStatus.PLATFORM_GATE, TargetStatusRules.of(net.copy(content = Check(CheckStatus.GATED, CheckSource.USER), contentGeneration = 0), true, true, true))
+        assertEquals(TargetStatus.PLATFORM_GATE, TargetStatusRules.of(net.copy(content = Check(CheckStatus.GATED, CheckSource.USER), stale = true), true, true, true))
         assertEquals(TargetStatus.NETWORK_BLOCKED, TargetStatusRules.of(net.copy(network = Check(CheckStatus.FAIL, CheckSource.AUTO)), true, true, true))
         for (s in TargetStatus.entries) assertFalse(TargetStatusRules.label(s).contains('_'))
     }

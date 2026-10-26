@@ -165,7 +165,7 @@ fun ControlledWebProbe(state: TrialState, modifier: Modifier = Modifier) {
                 seeking = json?.optBoolean("seeking") ?: false, advertisement = json?.optBoolean("advertisement") ?: false,
                 preview = json?.optBoolean("preview") ?: false, observerError = failed || json == null,
                 needsInteraction = "PLAY_MEDIA" in state.goal!!.requiredCapabilities && json?.optBoolean("needsInteraction") == true,
-                blockingClass = json?.optString("blockingClass", "UNKNOWN") ?: "UNKNOWN")
+                blockingClass = Observation.blockingClass(json?.optString("blockingClass", "UNKNOWN")))
             finalObservation = o
             val verdict = GoalEvaluator.evaluate(state.goal, o)
             // The evaluator's minimum is 2s; this renderer leaves an extra quiet window for delayed gates.

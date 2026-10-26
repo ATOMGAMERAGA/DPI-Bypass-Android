@@ -257,7 +257,8 @@ object SocialText {
     fun failure(cls: String): String = when (cls) {
         "DNS_FAILURE" -> "alan adı çözülemedi"
         "DNS_NON_PUBLIC_ANSWER" -> "DNS yerel/özel bir adres döndürdü (DNS müdahalesi şüphesi)"
-        "TLS_CERT_MISMATCH" -> "sertifika doğrulanamadı (araya giren sayfa ya da giriş portalı olabilir)"
+        "TLS_CERT_MISMATCH" -> "sertifika bu alan adına ait değil (araya giren sayfa ya da giriş portalı olabilir)"
+        "TLS_CERT_UNTRUSTED" -> "sertifika güvenilir değil (giriş portalı, araya giren sayfa ya da yanlış cihaz saati olabilir; DPI kesintisi değil)"
         "TLS_HANDSHAKE_FAILED", "TLS_FAILURE" -> "TLS el sıkışması kesildi (SNI/DPI müdahalesi şüphesi)"
         "TCP_REFUSED" -> "bağlantı reddedildi"
         "TCP_RESET" -> "bağlantı sıfırlandı (DPI müdahalesi şüphesi)"
@@ -274,6 +275,7 @@ object SocialText {
         mode == CheckMode.UNSUPPORTED -> "ölçülmez"
         c.status == CheckStatus.PASS -> if (c.source == CheckSource.USER) "çalışıyor (onayın)" else "açık (otomatik)"
         c.status == CheckStatus.PARTIAL -> "kısmen (onayın)"
+        c.status == CheckStatus.GATED -> "platform doğrulama istiyor (bildirimin)"
         c.status == CheckStatus.FAIL -> if (c.source == CheckSource.USER) "çalışmıyor (bildirimin)" else "kapalı (otomatik)"
         c.status == CheckStatus.MANUAL_REQUIRED || mode == CheckMode.MANUAL -> "onayın gerekli"
         else -> "ölçülmedi"
@@ -296,11 +298,11 @@ object SocialText {
         Phase.DISABLED -> "Kapalı"
         Phase.IDLE -> "Hazır"
         Phase.BASELINING -> "Başlangıç ölçülüyor"
-        Phase.SELECTING, Phase.PREPARING -> "Yöntem hazırlanıyor"
+        Phase.SELECTING, Phase.PREPARING -> "Hazırlanıyor"
         Phase.APPLYING -> "Yöntem uygulanıyor"
-        Phase.PROBING -> "Bağlantı test ediliyor"
+        Phase.PROBING -> "Test ediliyor"
         Phase.AUTO_EVALUATING -> "Test penceresi gözleniyor"
-        Phase.WAITING_FOR_USER -> "Yanıtınız bekleniyor"
+        Phase.WAITING_FOR_USER -> "Kullanıcı kontrolü gerekiyor"
         Phase.CANCELLING, Phase.ROLLING_BACK -> "Geri alınıyor"
         Phase.PAUSED -> "Duraklatıldı"
         Phase.FINISHED -> "Tamamlandı"
@@ -313,14 +315,15 @@ object SocialText {
         "PERMISSION_REQUIRED" -> "Bazı yöntemler için yerel DPI bağlantısı gerekiyor."
         "USER_UNABLE_TO_TEST" -> "Test edilemedi olarak işaretlendi."
         "USER_INACTIVE" -> "Yanıt gelmediği için deneme geri alındı."
-        "CONTEXT_CHANGED" -> "Ağ veya ayarlar değişti; yeniden başlatın."
+        "CONTEXT_CHANGED" -> "Ağ değişti, yeniden kontrol gerekiyor; denemeyi yeniden başlatın."
         "NETWORK_UNAVAILABLE" -> "Doğrulanmış internet bağlantısı yok; ağ gelince yeniden başlatın."
         else -> null
     }
 }
 
 /** Bir özelliğin ölçülen/bildirilen durumu. */
-enum class CheckStatus { PASS, PARTIAL, FAIL, UNKNOWN, MANUAL_REQUIRED }
+/** [GATED]: platform giriş/yaş/kimlik/bot doğrulaması istiyor (sunucu tarafı; ağ başarısızlığı değil). */
+enum class CheckStatus { PASS, PARTIAL, FAIL, UNKNOWN, MANUAL_REQUIRED, GATED }
 enum class CheckSource { NONE, AUTO, USER }
 data class Check(val status: CheckStatus = CheckStatus.UNKNOWN, val source: CheckSource = CheckSource.NONE, val detail: String = "")
 
@@ -332,27 +335,41 @@ data class Check(val status: CheckStatus = CheckStatus.UNKNOWN, val source: Chec
  *  - [strategyId]: sonucun ölçüldüğü motor planı
  *  - [stale]: bağlam (ağ, DNS, kapsam, süreç) değişti; yeniden doğrulanmadan
  *    güncel başarı diye gösterilmez.
+ *  - [contentGeneration]: içerik sonucunun alındığı bağlam kuşağı. Yeni bağlamdaki
+ *    yalnız ağ ölçümü eski kullanıcı onayını GÜNCEL yapamaz ([contentCurrent]).
  */
 data class TargetResult(val key: String, val platformId: String, val network: Check = Check(), val content: Check = Check(),
     val strategyId: String? = null, val contextGeneration: Long = 0, val verifiedAtMs: Long = 0, val stale: Boolean = false,
-    val failureClass: String = "", val conflict: String = "") {
-    val working: Boolean get() = !stale && network.status == CheckStatus.PASS && content.status != CheckStatus.FAIL
+    val failureClass: String = "", val conflict: String = "", val contentGeneration: Long = -1) {
+    /** İçerik sonucu bu bağlamda mı alındı? Önceki bağlamın onayı yalnız geçmiş bilgisidir. */
+    val contentCurrent: Boolean get() = !stale && content.source != CheckSource.NONE && contentGeneration == contextGeneration
+    val working: Boolean get() = !stale && network.status == CheckStatus.PASS && content.status != CheckStatus.FAIL &&
+        content.status != CheckStatus.GATED && (content.source == CheckSource.NONE || contentCurrent)
 }
 
 /** Bir hedefin kullanıcıya gösterilen tek durumu; birbirine karışmaması için ayrı sınıflar. */
-enum class TargetStatus { OUT_OF_SCOPE, NO_ENGINE, NO_NETWORK, NOT_CHECKED, VERIFYING, WORKING, NETWORK_OPEN_CONFIRM, PARTIAL, NOT_WORKING, NETWORK_BLOCKED, UNCERTAIN }
+enum class TargetStatus { OUT_OF_SCOPE, NO_ENGINE, NO_NETWORK, NOT_CHECKED, VERIFYING, WORKING, NETWORK_OPEN_CONFIRM, PARTIAL, NOT_WORKING,
+    NETWORK_BLOCKED, UNCERTAIN, PLATFORM_GATE }
 
 object TargetStatusRules {
     /**
-     * Öncelik: kapsam dışı > ağ yok > bayat (yeniden doğrulanmalı) > kullanıcı
-     * bildirimi > otomatik ağ ölçümü. Otomatik ağ ölçümü tek başına "çalışıyor"
-     * üretmez; içerik/uygulama için kullanıcı onayı ayrı istenir.
+     * Öncelik: kapsam dışı > ağ yok > bayat (yeniden doğrulanmalı) > platform
+     * doğrulaması > kullanıcı bildirimi (yalnız bu bağlamda alınmışsa) > otomatik ağ
+     * ölçümü. Otomatik ağ ölçümü tek başına "çalışıyor" üretmez; içerik/uygulama için
+     * kullanıcı onayı ayrı istenir. Hesap doğrulaması gözlendiyse ağ açık olsa bile
+     * gizlenmez (bayat olsa bile — kullanıcı yeniden bildirene kadar).
      */
     fun of(result: TargetResult?, inScope: Boolean, engineConnected: Boolean, networkUsable: Boolean): TargetStatus = when {
         !inScope -> TargetStatus.OUT_OF_SCOPE
         !networkUsable -> TargetStatus.NO_NETWORK
         result == null -> if (engineConnected) TargetStatus.NOT_CHECKED else TargetStatus.NO_ENGINE
+        result.content.status == CheckStatus.GATED -> TargetStatus.PLATFORM_GATE
         result.stale -> TargetStatus.VERIFYING
+        !result.contentCurrent -> when (result.network.status) {
+            CheckStatus.PASS -> TargetStatus.NETWORK_OPEN_CONFIRM
+            CheckStatus.FAIL -> TargetStatus.NETWORK_BLOCKED
+            else -> TargetStatus.UNCERTAIN
+        }
         result.content.status == CheckStatus.FAIL && result.content.source == CheckSource.USER -> TargetStatus.NOT_WORKING
         result.content.status == CheckStatus.PARTIAL -> TargetStatus.PARTIAL
         result.network.status == CheckStatus.PASS && result.content.status == CheckStatus.PASS -> TargetStatus.WORKING
@@ -366,10 +383,11 @@ object TargetStatusRules {
         TargetStatus.NO_ENGINE -> "Bağlantı kapalı"
         TargetStatus.NO_NETWORK -> "Ağ yok"
         TargetStatus.NOT_CHECKED -> "Kontrol edilmedi"
-        TargetStatus.VERIFYING -> "Yeniden doğrulanmalı"
+        TargetStatus.VERIFYING -> "Ağ değişti, yeniden kontrol gerekiyor"
         TargetStatus.WORKING -> "Çalışıyor"
-        TargetStatus.NETWORK_OPEN_CONFIRM -> "Ağ açık · onay bekliyor"
-        TargetStatus.PARTIAL -> "Kısmi erişim"
+        TargetStatus.NETWORK_OPEN_CONFIRM -> "Ağ açık · kullanıcı kontrolü gerekiyor"
+        TargetStatus.PARTIAL -> "Kısmen çalışıyor"
+        TargetStatus.PLATFORM_GATE -> "Platform doğrulama istiyor"
         TargetStatus.NOT_WORKING -> "Çalışmıyor"
         TargetStatus.NETWORK_BLOCKED -> "Ağ yolu kapalı"
         TargetStatus.UNCERTAIN -> "Belirsiz"
@@ -425,7 +443,9 @@ object ProbeClassifier {
         val (outcome, cls) = when (e) {
             is java.net.UnknownHostException -> "FAIL" to if ("PUBLIC_TARGET_REQUIRED" in message) "DNS_NON_PUBLIC_ANSWER" else "DNS_FAILURE"
             is javax.net.ssl.SSLPeerUnverifiedException -> "FAIL" to "TLS_CERT_MISMATCH"
-            is javax.net.ssl.SSLHandshakeException -> "FAIL" to "TLS_HANDSHAKE_FAILED"
+            // Güvenilmeyen sertifika zinciri (giriş portalı, araya giren sayfa, yanlış
+            // cihaz saati) SNI/DPI kesintisinden AYRI sınıftır: aynı istisna türüyle gelir.
+            is javax.net.ssl.SSLHandshakeException -> "FAIL" to if (certificateProblem(e)) "TLS_CERT_UNTRUSTED" else "TLS_HANDSHAKE_FAILED"
             is javax.net.ssl.SSLException -> "FAIL" to "TLS_FAILURE"
             is java.net.ConnectException -> "FAIL" to "TCP_REFUSED"
             is java.net.SocketTimeoutException -> "UNKNOWN" to if ("connect" in message.lowercase()) "TCP_TIMEOUT" else "READ_TIMEOUT"
@@ -434,6 +454,9 @@ object ProbeClassifier {
         }
         return NetworkEvidence(outcome, bytes = 0, reason = "$route:$cls", failureClass = cls)
     }
+
+    private fun certificateProblem(e: Throwable): Boolean =
+        generateSequence(e) { it.cause }.take(8).any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException }
 
     /** `Retry-After`: saniye ya da HTTP-date. Geçersizse 60 sn; 1 sn..24 sa aralığına sıkıştırılır. */
     fun retryAfterSeconds(value: String?, nowMs: Long): Long {
@@ -485,8 +508,13 @@ data class Observation(val schemaVersion: Int = 2, val sessionId: String = "", v
                 j.optString("observerVersion"), j.optString("evaluatorVersion"), j.optString("actualSurface", "UNKNOWN"), j.optString("identityContext", "UNKNOWN"),
                 j.optString("identityEvidence", "UNKNOWN"), j.optString("routeProvenance", "UNVERIFIED"), tri("targetMatched"), tri("contentPresent"), tri("blockingGate"),
                 tri("mediaProgress"), tri("freshEvidence"), tri("documentVisible"), j.strings("observedCapabilities"), j.optInt("stableSamples"), j.optLong("stableDurationMs"),
-                j.optDouble("mediaProgressSeconds", 0.0), j.optBoolean("seeking"), j.optBoolean("advertisement"), j.optBoolean("preview"), j.optBoolean("observerError"), j.optBoolean("needsInteraction"))
+                j.optDouble("mediaProgressSeconds", 0.0), j.optBoolean("seeking"), j.optBoolean("advertisement"), j.optBoolean("preview"), j.optBoolean("observerError"), j.optBoolean("needsInteraction"),
+                blockingClass(j.optString("blockingClass", "UNKNOWN")))
         }
+
+        /** Gözlemcinin tanıyabildiği sunucu/hesap sınıfları; bilinmeyen değer UNKNOWN kalır (başarıya ya da başka sınıfa dönüşmez). */
+        val KnownBlockingClasses = setOf("AGE_OR_ID_VERIFICATION_REQUIRED", "LOGIN_REQUIRED", "BOT_CHALLENGE", "ACCOUNT_RESTRICTION")
+        fun blockingClass(raw: String?): String = raw?.takeIf { it in KnownBlockingClasses } ?: "UNKNOWN"
     }
 }
 

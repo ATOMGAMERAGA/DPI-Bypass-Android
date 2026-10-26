@@ -277,7 +277,7 @@ class MultiTargetTest {
         val c = coordinator(e, backgroundScope)
         val targets = SocialPlatform.catalog.mapNotNull { Target.home(it.id) }
         c.start(goal, targets.first(), TestMode.AUTO_BETA, true, false, false, native("P1", "P2", "P3", "P4", "P5", "P6", "P7"), targets.drop(1)); runCurrent()
-        assertTrue(c.state.value.requests <= 80)
+        assertTrue(c.state.value.requests <= ExperimentCoordinator.MAX_ROUND_REQUESTS)
         assertTrue(c.state.value.phase == Phase.PAUSED && c.state.value.pauseReason == "BUDGET_LIMIT" || c.state.value.phase == Phase.FINISHED)
     }
 
