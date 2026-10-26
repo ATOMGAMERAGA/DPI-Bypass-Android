@@ -140,13 +140,22 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             !(s.phase == Phase.PAUSED && s.pauseReason in setOf("CONTEXT_CHANGED", "NETWORK_UNAVAILABLE"))
     }
 
-    private fun budget(targets: Int) = (24 + 8 * (targets - 1).coerceAtLeast(0)).coerceAtMost(80)
+    /**
+     * Tur başına GERÇEK istek bütçesi (HEAD→GET iki istektir). Hedef başına bir
+     * başlangıç + aday başına bir ölçüm + kararlılık için bir ölçüm gerekir; tavan,
+     * bütün katalog seçiliyken bile ortak planın aranabilmesine yeter ama yüzlerce
+     * bağlantı açmaz.
+     */
+    private fun budget(targets: Int) = (24 + 10 * (targets - 1).coerceAtLeast(0)).coerceAtMost(MAX_ROUND_REQUESTS)
 
     suspend fun start(goal: Goal, target: Target, mode: TestMode, baselineStillPresent: Boolean?,
         metered: Boolean, allowMeteredRenderer: Boolean, candidates: List<CandidateDefinition>, others: List<Target> = emptyList()) {
         if (!enabledFlag) return
-        if (cooldownRemaining(target.key) > 0) {
-            mutex.withLock { update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN", message = "Hedefin bekleme süresi henüz dolmadı.") } }
+        // Hız sınırı bildiren HERHANGİ bir seçili hedef (odak dışı da) beklenir: aynı
+        // motor hepsini etkilediği için o hedefe istek atmadan aday değerlendirilemez.
+        (listOf(target) + others).firstOrNull { cooldownRemaining(it.key) > 0 }?.let { waiting ->
+            mutex.withLock { update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN",
+                message = "${label(waiting)} hız sınırı bildirdi; bekleme süresi henüz dolmadı. Bekleyin ya da bu uygulamayı seçimden çıkarın.") } }
             return
         }
         stopTrial()
@@ -161,6 +170,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             catalog = candidates.filter { it.schemaVersion == 2 && it.candidateVersion == "1.0.0" }.distinctBy { it.effectKey }
             pending = ArrayDeque(catalog)
             val all = (listOf(target) + others).distinctBy { it.key }
+            roundBudget = budget(all.size)
             val previous = state.value
             mutable.value = TrialState(phase = Phase.BASELINING, mode = mode, sessionId = id(), goal = goal, target = target, targets = all,
                 results = previous.results, plan = previous.plan, contextGeneration = previous.contextGeneration,
@@ -177,16 +187,52 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
         work = scope.launch { mutex.withLock { runRound() } }
     }
 
-    /** Bütçeyi ayırıp tek bir ağ yolu ölçümü yapar. */
-    private suspend fun measure(target: Target, through: Boolean, timeoutReason: String): NetworkEvidence {
+    /** Bu turun istek bütçesi ([start]'ta hedef sayısına göre belirlenir). */
+    private var roundBudget = budget(1)
+
+    /**
+     * Tek bir ağ yolu ölçümü. Her istekten ÖNCE bütçe denetlenir: olası en kötü
+     * maliyet (HEAD→GET = [REQUEST_RESERVE] istek, [BYTE_RESERVE] başlık baytı)
+     * ayrılır; ölçüm bitince gerçek değerle değiştirilir. Zaman aşımı/iptalde
+     * rezerv muhafazakâr biçimde harcanmış sayılır.
+     *
+     * null: bütçe bu isteğe yetmiyor, istek GÖNDERİLMEDİ.
+     * Retry-After içeren her yanıt — hangi hedeften gelirse gelsin — o hedefe özel
+     * bekleme yazar; çağıran turu durdurmakla yükümlüdür ([waitRequested]).
+     */
+    private suspend fun measure(target: Target, through: Boolean, timeoutReason: String): NetworkEvidence? {
+        val s = state.value
+        if (s.requests + REQUEST_RESERVE > roundBudget || s.diagnosticBytes + BYTE_RESERVE > MAX_DIAGNOSTIC_BYTES || probeMs >= MAX_PROBE_MS) return null
         val began = now()
-        update { copy(requests = requests + 1, diagnosticBytes = diagnosticBytes + 262_144) }
-        // Reserve one request and the HTTP implementation's maximum header allocation before transport.
-        val evidence = withTimeoutOrNull(20_000) { adapter.probe(target, through) }
-            ?: NetworkEvidence("UNKNOWN", bytes = 262_144, reason = timeoutReason)
-        probeMs += (now() - began).coerceAtLeast(0)
-        update { copy(diagnosticBytes = diagnosticBytes - 262_144 + evidence.bytes.coerceIn(0, 262_144)) }
-        return evidence
+        update { copy(requests = requests + REQUEST_RESERVE, diagnosticBytes = diagnosticBytes + BYTE_RESERVE) }
+        var evidence: NetworkEvidence? = null
+        try {
+            evidence = withTimeoutOrNull(20_000) { adapter.probe(target, through) }
+        } finally {
+            probeMs += (now() - began).coerceAtLeast(0)
+            val used = evidence?.requests?.coerceIn(1, REQUEST_RESERVE) ?: REQUEST_RESERVE
+            val bytes = evidence?.bytes?.coerceIn(0, BYTE_RESERVE) ?: BYTE_RESERVE
+            update { copy(requests = requests - REQUEST_RESERVE + used, diagnosticBytes = diagnosticBytes - BYTE_RESERVE + bytes) }
+        }
+        val result = evidence ?: NetworkEvidence("UNKNOWN", bytes = BYTE_RESERVE, requests = REQUEST_RESERVE, reason = timeoutReason, failureClass = "READ_TIMEOUT")
+        if (result.retryAfterSeconds > 0) cooldown(target.key, result.retryAfterSeconds)
+        return result
+    }
+
+    private fun waitRequested(e: NetworkEvidence?) = e != null && e.retryAfterSeconds > 0
+
+    /** Hız sınırı: geçici aday geri alınır, tur durur; sonraki profil DENENMEZ. */
+    private suspend fun pauseForCooldown(target: Target, e: NetworkEvidence) {
+        if (!rollback()) return
+        update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN",
+            message = "${label(target)} hız sınırı bildirdi (${e.retryAfterSeconds} sn). Deneme geri alındı; süre dolmadan başka yöntem denenmeyecek.") }
+    }
+
+    /** Bütçe bir ölçümün ortasında bitti: aday başarısız SAYILMAZ, geri alınır ve kuyruğun başına döner. */
+    private suspend fun pauseForBudget(candidate: CandidateDefinition?) {
+        candidate?.let { pending.addFirst(it) }
+        if (!rollback()) return
+        update { copy(phase = Phase.PAUSED, pauseReason = "BUDGET_LIMIT", message = "Tur bütçesi doldu; yarım kalan yöntem başarısız sayılmadı. \"Kalanları dene\" ile sürdürebilirsin.") }
     }
 
     private fun networkCheck(e: NetworkEvidence) = Check(when (e.technicalOutcome) {
@@ -195,10 +241,14 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
     private fun recordNetwork(target: Target, e: NetworkEvidence, strategyId: String?) {
         val s = state.value
         val old = s.results[target.key]
+        // Aynı bağlamda ve aynı planla alınmış içerik sonucu korunur; kuşağı değişmez.
+        // Platform doğrulaması (GATED) ağ ölçümüyle silinmez: sunucu şartı ağ yolundan bağımsızdır.
+        val keepContent = old != null && (!old.stale && old.strategyId == strategyId && old.contentGeneration == s.contextGeneration ||
+            old.content.status == CheckStatus.GATED)
         val result = TargetResult(target.key, target.platformId, networkCheck(e),
-            content = old?.content?.takeIf { !old.stale && old.strategyId == strategyId } ?: Check(),
+            content = if (keepContent) old!!.content else Check(),
             strategyId = strategyId, contextGeneration = s.contextGeneration, verifiedAtMs = adapter.wallClockMs(),
-            failureClass = e.failureClass)
+            failureClass = e.failureClass, contentGeneration = if (keepContent) old!!.contentGeneration else -1)
         update { copy(results = results + (target.key to result)) }
     }
 
@@ -212,29 +262,32 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                 return
             }
             val dns = runCatching { adapter.dnsDiagnosis(focus) }.getOrDefault("UNKNOWN")
-            val direct = measure(focus, false, "BASELINE_TRANSPORT_UNKNOWN")
+            val direct = measure(focus, false, "BASELINE_TRANSPORT_UNKNOWN") ?: return pauseForBudget(null)
             update { copy(technicalOutcome = direct.technicalOutcome, baselineOutcome = direct.technicalOutcome,
                 message = "Başlangıç: ${SocialText.evidence(direct.reason)}." + dnsNote(dns)) }
-            if (direct.retryAfterSeconds > 0) {
-                cooldown(focus.key, direct.retryAfterSeconds)
-                update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN", message = "Hedef hız sınırı bildirdi; yeni istek durduruldu.") }; return
-            }
+            if (waitRequested(direct)) return pauseForCooldown(focus, direct)
             // Motor açıksa her hedef, kullanıcının şu an gerçekten yaşadığı yoldan
             // (motorun o anki planı) da ölçülür; gerileme ve kazanç buna göre hesaplanır.
             val engine = adapter.available()
             val plan = state.value.plan.strategyId.takeIf { state.value.plan.installed }
-            before = targets.associate { t ->
-                val e = if (engine) measure(t, true, "BASELINE_TRANSPORT_UNKNOWN") else if (t == focus) direct else measure(t, false, "BASELINE_TRANSPORT_UNKNOWN")
+            val measured = mutableMapOf<String, String>()
+            for (t in targets) {
+                val e = if (!engine && t == focus) direct
+                    else measure(t, engine, "BASELINE_TRANSPORT_UNKNOWN") ?: return pauseForBudget(null)
                 if (engine) recordNetwork(t, e, plan)
-                t.key to e.technicalOutcome
+                // Odak dışı hedefin bekleme isteği de turu durdurur.
+                if (waitRequested(e)) return pauseForCooldown(t, e)
+                measured[t.key] = e.technicalOutcome
             }
+            before = measured
             update { copy(phase = Phase.SELECTING) }
         }
-        val requestBudget = budget(targets.size)
         while (pending.isNotEmpty()) {
             if (!enabledFlag) { rollback(); return }
-            val needs = if (pending.first().strategyId != null) targets.size * 2 else 1
-            if (groupAttempts >= 12 || state.value.requests + needs > requestBudget || state.value.diagnosticBytes + 262_144L * needs > 5L * 1024 * 1024 || probeMs >= 120_000) {
+            // Aday başına beklenen en az istek: her hedefte bir ölçüm. Kararlılık
+            // ölçümleri ve HEAD→GET ek istekleri her istek öncesi ayrıca denetlenir.
+            val needs = if (pending.first().strategyId != null) targets.size else 1
+            if (groupAttempts >= 12 || state.value.requests + needs > roundBudget || probeMs >= MAX_PROBE_MS) {
                 update { copy(phase = Phase.PAUSED, pauseReason = "BUDGET_LIMIT", message = "Tur bütçesi doldu; yalnız kalanlar sürdürülebilir.") }; return
             }
             val candidate = pending.removeFirst()
@@ -259,20 +312,21 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                 groupAttempts++
                 update { copy(phase = Phase.PROBING, resourceDisposition = "TRIAL_ACTIVE", attempted = attempted + 1) }
                 val native = candidate.strategyId != null
-                val evidence = measure(focus, native, "PROBE_TIMEOUT")
+                val evidence = measure(focus, native, "PROBE_TIMEOUT") ?: return pauseForBudget(candidate)
                 candidateOutcomes = mapOf(focus.key to evidence)
                 update { copy(technicalOutcome = evidence.technicalOutcome,
                     message = "${candidate.displayName}: ${SocialText.evidence(evidence.reason)}." + if (state.value.mode == TestMode.MANUAL) " Şimdi uygulamada/tarayıcıda kontrol edin." else "") }
-                if (evidence.retryAfterSeconds > 0) {
-                    cooldown(focus.key, evidence.retryAfterSeconds)
-                    if (rollback()) update { copy(phase = Phase.PAUSED, pauseReason = "COOLDOWN", message = "Hız sınırı: ${evidence.retryAfterSeconds} saniye bekleyin.") }
-                    return
-                }
+                if (waitRequested(evidence)) return pauseForCooldown(focus, evidence)
                 if (native) {
                     // Aynı motor bütün kapsamdaki uygulamaları etkiler: diğer hedefler
                     // de adayın gerçek yolundan ölçülür. Önceden çalışan bir hedef
                     // bozulursa aday sessizce kazanan ilan edilmez.
-                    candidateOutcomes = candidateOutcomes + targets.filter { it != focus }.associate { it.key to measure(it, true, "PROBE_TIMEOUT") }
+                    for (t in targets) {
+                        if (t == focus) continue
+                        val e = measure(t, true, "PROBE_TIMEOUT") ?: return pauseForBudget(candidate)
+                        candidateOutcomes = candidateOutcomes + (t.key to e)
+                        if (waitRequested(e)) return pauseForCooldown(t, e)
+                    }
                     val regressed = targets.filter { before[it.key] == "PASS" && candidateOutcomes[it.key]?.technicalOutcome != "PASS" }
                     if (regressed.isNotEmpty()) {
                         val names = regressed.joinToString { label(it) }
@@ -305,12 +359,16 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                         continue
                     }
                     if (gained.size == open.size) {
-                        if (confirmStable(focus, gained)) {
-                            keep("NETWORK_VERIFIED_AUTO", "${candidate.displayName}: seçili hedeflerin ağ yolu bu yöntemle açıldı (iki ölçüm). İçerik/uygulama için onayın gerekiyor.",
-                                if (observerAvailable) CheckStatus.UNKNOWN else CheckStatus.MANUAL_REQUIRED, CheckSource.NONE, causal = "NETWORK_PATH")
-                            return
+                        when (confirmStable(focus, gained)) {
+                            Stability.STABLE -> {
+                                keep("NETWORK_VERIFIED_AUTO", "${candidate.displayName}: seçili hedeflerin ağ yolu bu yöntemle açıldı (iki ölçüm). İçerik/uygulama için onayın gerekiyor.",
+                                    if (observerAvailable) CheckStatus.UNKNOWN else CheckStatus.MANUAL_REQUIRED, CheckSource.NONE, causal = "NETWORK_PATH")
+                                return
+                            }
+                            Stability.WAIT -> return
+                            Stability.BUDGET -> return pauseForBudget(candidate)
+                            Stability.UNSTABLE -> update { copy(message = "${candidate.displayName}: ikinci ölçümde tutarsız; kararsız sayıldı.") }
                         }
-                        update { copy(message = "${candidate.displayName}: ikinci ölçümde tutarsız; kararsız sayıldı.") }
                     } else if (gained.isNotEmpty() && (best?.second ?: 0) < gained.size) {
                         best = candidate to gained.size
                     }
@@ -355,18 +413,26 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             else if (deferred.isNotEmpty()) "AUTO_INCONCLUSIVE" else if (attempted == 0) "NO_APPLICABLE_METHODS" else "CANDIDATES_EXHAUSTED") }
     }
 
-    /** Kararlılık: kazanılan hedefler ikinci kez ölçülür; biri bile tutmazsa kazanç sayılmaz. */
-    private suspend fun confirmStable(focus: Target, gained: List<Target>): Boolean {
+    private enum class Stability { STABLE, UNSTABLE, WAIT, BUDGET }
+
+    /**
+     * Kararlılık: kazanılan hedefler ikinci kez ölçülür; biri bile tutmazsa kazanç
+     * sayılmaz. Bekleme isteği (Retry-After) ya da biten bütçe "kararsız" DEĞİLDİR:
+     * tur durur, sonraki profile geçilmez.
+     */
+    private suspend fun confirmStable(focus: Target, gained: List<Target>): Stability {
         for (t in gained) {
-            val again = measure(t, true, "PROBE_TIMEOUT")
-            if (again.technicalOutcome != "PASS") return false
+            val again = measure(t, true, "PROBE_TIMEOUT") ?: return Stability.BUDGET
+            if (waitRequested(again)) { pauseForCooldown(t, again); return Stability.WAIT }
+            if (again.technicalOutcome != "PASS") return Stability.UNSTABLE
             if (t == focus) update { copy(technicalOutcome = again.technicalOutcome) }
         }
-        return true
+        return Stability.STABLE
     }
 
+    /** true: tur burada bitti (plan korundu, bekleme ya da bütçe nedeniyle duraklatıldı). */
     private suspend fun applyAndConfirmBest(candidate: CandidateDefinition, focus: Target, targets: List<Target>): Boolean {
-        if (state.value.requests + targets.size * 2 > budget(targets.size)) return false
+        if (state.value.requests + targets.size * REQUEST_RESERVE > roundBudget) return false
         val operation = id()
         update { copy(phase = Phase.APPLYING, attemptId = id(), operationId = operation, candidate = candidate, documentGeneration = documentGeneration + 1) }
         return try {
@@ -374,7 +440,13 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             withTimeout(15_000) { adapter.apply(candidate, operation) }
             adapter.journal(operation, "APPLIED", candidate)
             update { copy(phase = Phase.PROBING, resourceDisposition = "TRIAL_ACTIVE") }
-            candidateOutcomes = targets.associate { it.key to measure(it, true, "PROBE_TIMEOUT") }
+            val outcomes = mutableMapOf<String, NetworkEvidence>()
+            for (t in targets) {
+                val e = measure(t, true, "PROBE_TIMEOUT") ?: run { rollback(); return false }
+                outcomes[t.key] = e
+                if (waitRequested(e)) { pauseForCooldown(t, e); return true }
+            }
+            candidateOutcomes = outcomes
             val regressed = targets.any { before[it.key] == "PASS" && candidateOutcomes[it.key]?.technicalOutcome != "PASS" }
             val gained = targets.count { before[it.key] != "PASS" && candidateOutcomes[it.key]?.technicalOutcome == "PASS" }
             if (regressed || gained == 0) { rollback(); return false }
@@ -408,9 +480,11 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             t.key to TargetResult(t.key, t.platformId, e?.let(::networkCheck) ?: old?.network?.copy() ?: Check(),
                 content = if (t == focus) Check(contentStatus, contentSource) else Check(),
                 strategyId = candidate.strategyId, contextGeneration = s.contextGeneration, verifiedAtMs = stamp,
-                failureClass = e?.failureClass.orEmpty(), conflict = old?.conflict.orEmpty())
+                failureClass = e?.failureClass.orEmpty(), conflict = old?.conflict.orEmpty(),
+                contentGeneration = if (t == focus) s.contextGeneration else -1)
         } else focus?.let { t -> mapOf(t.key to (s.results[t.key] ?: TargetResult(t.key, t.platformId))
-            .copy(content = Check(contentStatus, contentSource), verifiedAtMs = stamp, stale = false)) } ?: emptyMap()
+            .copy(content = Check(contentStatus, contentSource), verifiedAtMs = stamp, stale = false,
+                contextGeneration = s.contextGeneration, contentGeneration = s.contextGeneration)) } ?: emptyMap()
         update { copy(phase = Phase.FINISHED, resourceDisposition = "KEPT_ACTIVE", finishReason = finish, message = message,
             userOutcome = if (contentSource == CheckSource.USER) "RESOLVED" else userOutcome, causalAttribution = causal,
             results = results + updated,
@@ -455,7 +529,7 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             val s = state.value
             val accepts = s.phase == Phase.WAITING_FOR_USER || event.outcome == "RESOLVED" &&
                 (s.phase == Phase.AUTO_EVALUATING || s.phase == Phase.PAUSED && s.pauseReason == "USER_ACTION_REQUIRED")
-            if (event.outcome !in setOf("STILL_PRESENT", "RESOLVED", "PARTIAL", "PARTIAL_ACCEPTED", "NOT_TESTED") || !accepts || event.sessionId != s.sessionId || event.attemptId != s.attemptId || event.operationId != s.operationId ||
+            if (event.outcome !in FeedbackOutcomes || !accepts || event.sessionId != s.sessionId || event.attemptId != s.attemptId || event.operationId != s.operationId ||
                 event.contextGeneration != s.contextGeneration || event.modeGeneration != s.modeGeneration || event.expectedStateVersion != s.version || !eventIds.add(event.eventId)) return
             inactivity?.cancel()
             update { copy(userOutcome = event.outcome) }
@@ -464,7 +538,17 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                 "PARTIAL_ACCEPTED" -> keep("PARTIAL_ACCEPTED", "Kısmi erişimi kabul ettin; yöntem korunuyor.", CheckStatus.PARTIAL, CheckSource.USER)
                 "PARTIAL" -> { update { copy(message = "Bir kısmı çalışıyor: böyle kullan veya devam et.") }; waitForUser() }
                 "STILL_PRESENT" -> if (rollback()) next = true
-                "NOT_TESTED" -> if (rollback()) update { copy(phase = Phase.PAUSED, pauseReason = "USER_UNABLE_TO_TEST") }
+                "NOT_TESTED", "UNSURE" -> if (rollback()) update { copy(phase = Phase.PAUSED, pauseReason = "USER_UNABLE_TO_TEST") }
+                // Sunucu şartı: aday onu çözmedi (yerel ağ ayarı hesap kaydını değiştirmez).
+                // Geçici aday geri alınır; DPI profilleri bu hedef için yinelenmez.
+                "VERIFICATION_REQUIRED" -> if (rollback()) {
+                    pending = ArrayDeque(pending.filter { it.strategyId == null })
+                    val focus = s.target
+                    update { copy(phase = Phase.FINISHED, finishReason = "PLATFORM_GATE",
+                        message = "Platform doğrulama istiyor. Yerel DNS/DPI yöntemi sunucudaki hesap şartını değiştiremez; profiller yinelenmedi.",
+                        results = if (focus == null) results else results + (focus.key to (results[focus.key] ?: TargetResult(focus.key, focus.platformId))
+                            .copy(content = Check(CheckStatus.GATED, CheckSource.USER), contentGeneration = contextGeneration))) }
+                }
             }
         }
         if (next) launchNext()
@@ -477,14 +561,26 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
      * başarı sayılmaz ve sıradaki adaylarla devam edilir.
      */
     suspend fun report(key: String, outcome: String) {
-        if (outcome !in setOf("RESOLVED", "PARTIAL", "STILL_PRESENT", "NOT_TESTED")) return
+        if (outcome !in ReportOutcomes) return
         var continueSearch = false
         mutex.withLock {
             val s = state.value
             val old = s.results[key] ?: s.targets.firstOrNull { it.key == key }?.let { TargetResult(it.key, it.platformId) } ?: return
-            val status = when (outcome) { "RESOLVED" -> CheckStatus.PASS; "PARTIAL" -> CheckStatus.PARTIAL; "STILL_PRESENT" -> CheckStatus.FAIL; else -> CheckStatus.UNKNOWN }
-            update { copy(results = results + (key to old.copy(content = Check(status, if (status == CheckStatus.UNKNOWN) CheckSource.NONE else CheckSource.USER),
-                verifiedAtMs = adapter.wallClockMs(), stale = old.stale && status == CheckStatus.UNKNOWN))) }
+            val status = when (outcome) { "RESOLVED" -> CheckStatus.PASS; "PARTIAL" -> CheckStatus.PARTIAL; "STILL_PRESENT" -> CheckStatus.FAIL
+                "VERIFICATION_REQUIRED" -> CheckStatus.GATED; else -> CheckStatus.UNKNOWN }
+            // Kullanıcı bildirimi otomatik kanıt değildir: kaynağı USER, bağlamı bu kuşak.
+            // "Emin değilim"/"Test edemedim" önceki sonucu başarı ya da başarısızlığa çevirmez.
+            if (status == CheckStatus.UNKNOWN) {
+                update { copy(results = results + (key to old.copy(content = Check(), contentGeneration = -1))) }
+                return@withLock
+            }
+            update { copy(results = results + (key to old.copy(content = Check(status, CheckSource.USER),
+                verifiedAtMs = adapter.wallClockMs(), contentGeneration = contextGeneration))) }
+            if (status == CheckStatus.GATED) {
+                update { copy(message = "${old.key.removePrefix("custom:").let { SocialPlatform.byId(it)?.displayName ?: it }}: platform doğrulama istiyor. " +
+                    "Yerel ağ yöntemi hesap şartını değiştiremez; plan geri alınmadı, profiller bu yüzden döndürülmeyecek.") }
+                return@withLock
+            }
             val autoPlan = s.finishReason == "NETWORK_VERIFIED_AUTO" && s.plan.operationId == s.operationId && s.plan.installed && s.target?.key == key
             if (outcome == "STILL_PRESENT" && autoPlan) {
                 s.target?.let { t -> s.goal?.let { g -> runCatching { adapter.quarantine(t, g) } } }
@@ -547,6 +643,12 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
                 update { copy(phase = Phase.AUTO_EVALUATING, documentGeneration = documentGeneration + 1, pauseReason = null) }; return
             }
             if (state.value.pauseReason in setOf("CONTEXT_CHANGED", "NETWORK_UNAVAILABLE")) return
+            if (state.value.pauseReason == "COOLDOWN") {
+                // Bekleme bütün seçili hedefler için dolmalı; süre geçtiği için başlangıç yeniden ölçülür.
+                if (state.value.targets.any { cooldownRemaining(it.key) > 0 }) return
+                before = emptyMap()
+            }
+            if (before.isEmpty() && state.value.targets.isNotEmpty()) update { copy(phase = Phase.BASELINING, pauseReason = null) }
             if (state.value.pauseReason == "BUDGET_LIMIT") {
                 groupAttempts = 0; probeMs = 0
                 update { copy(requests = 0, diagnosticBytes = 0, rendererLoads = 0, pauseReason = null) }
@@ -620,13 +722,19 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
             val strategy = s.plan.strategyId.takeIf { s.plan.installed }
             val regressed = mutableListOf<String>()
             for (t in targets) {
+                if (cooldownRemaining(t.key) > 0) continue
                 val e = withTimeoutOrNull(20_000) { adapter.probe(t, true) } ?: NetworkEvidence("UNKNOWN", reason = "THROUGH_CANDIDATE:READ_TIMEOUT", failureClass = "READ_TIMEOUT")
+                if (e.retryAfterSeconds > 0) cooldown(t.key, e.retryAfterSeconds)
                 val old = state.value.results[t.key]
                 if (old?.network?.status == CheckStatus.PASS && e.technicalOutcome != "PASS") regressed += label(t)
-                val sameEvidence = old != null && old.strategyId == strategy && e.technicalOutcome == "PASS"
+                // Yeni bağlamdaki ağ PASS'i yalnız ağ yolunu günceller. Önceki içerik/kullanıcı
+                // bildirimi geçmiş bilgisi olarak ESKİ kuşağıyla kalır ve güncel sayılmaz
+                // (yeniden onay gerekir); farklı planla alınmış içerik hiç taşınmaz.
+                val carry = old != null && (old.strategyId == strategy || old.content.status == CheckStatus.GATED)
                 update { copy(results = results + (t.key to TargetResult(t.key, t.platformId, networkCheck(e),
-                    content = if (sameEvidence) old!!.content else Check(), strategyId = strategy,
-                    contextGeneration = contextGeneration, verifiedAtMs = adapter.wallClockMs(), failureClass = e.failureClass))) }
+                    content = if (carry) old!!.content else Check(), strategyId = strategy,
+                    contextGeneration = contextGeneration, verifiedAtMs = adapter.wallClockMs(), failureClass = e.failureClass,
+                    contentGeneration = if (carry) old!!.contentGeneration else -1))) }
             }
             if (regressed.isNotEmpty() && !active()) update { copy(message = "Yeni bağlamda ${regressed.joinToString()} bu planla açılmadı. Yeni bir arama başlatabilirsin.") }
         }
@@ -769,6 +877,15 @@ class ExperimentCoordinator(private val adapter: TrialAdapter, private val scope
 
     companion object {
         private val ServerGates = setOf("AGE_OR_ID_VERIFICATION_REQUIRED", "LOGIN_REQUIRED", "BOT_CHALLENGE", "ACCOUNT_RESTRICTION")
+        /** Deneme sırasında kullanıcı yanıtları ("Emin değilim" = UNSURE; başarısızlık değildir). */
+        val FeedbackOutcomes = setOf("STILL_PRESENT", "RESOLVED", "PARTIAL", "PARTIAL_ACCEPTED", "NOT_TESTED", "UNSURE", "VERIFICATION_REQUIRED")
+        /** Tur dışı hedef bildirimi: Çalışıyor / Kısmen / Çalışmıyor / Doğrulama istiyor / Emin değilim. */
+        val ReportOutcomes = setOf("RESOLVED", "PARTIAL", "STILL_PRESENT", "VERIFICATION_REQUIRED", "UNSURE", "NOT_TESTED")
+        const val REQUEST_RESERVE = 2
+        const val BYTE_RESERVE = 262_144L
+        const val MAX_DIAGNOSTIC_BYTES = 5L * 1024 * 1024
+        const val MAX_PROBE_MS = 120_000L
+        const val MAX_ROUND_REQUESTS = 120
         /** Bağlam değişiminden sonra (tünel yeniden kurulurken) yeniden doğrulamadan önce beklenir. */
         const val REVERIFY_SETTLE_MS = 3_000L
     }
