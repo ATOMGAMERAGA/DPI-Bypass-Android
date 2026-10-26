@@ -9,11 +9,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.AtomicFile
 import kotlinx.coroutines.*
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Callback
-import okhttp3.Call
-import okhttp3.Response
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.File
@@ -27,12 +22,9 @@ import java.net.URI
 import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.SocketFactory
-import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.security.SecureRandom
-import java.io.IOException
-import kotlin.coroutines.resumeWithException
 
 interface AlphaEngine {
     fun resolveAlphaHost(host: String): List<String>
@@ -179,46 +171,12 @@ class AndroidTrialAdapter(private val app: Context, val journal: AlphaJournal) :
         }
     }
 
-    @OptIn(ExperimentalCoroutinesApi::class)
     override suspend fun probe(target: Target, throughCandidate: Boolean): NetworkEvidence = withContext(Dispatchers.IO) {
         val route = if (throughCandidate) "THROUGH_CANDIDATE" else "DIRECT_CONTROL"
-        val client = OkHttpClient.Builder().connectTimeout(6, TimeUnit.SECONDS).readTimeout(6, TimeUnit.SECONDS)
-            .callTimeout(18, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false)
-            .proxy(Proxy.NO_PROXY)
-            .dns(object : okhttp3.Dns {
-                override fun lookup(hostname: String): List<InetAddress> = pinned(hostname)
-            })
-            .socketFactory(if (throughCandidate) PublicSocksSocketFactory() else SocketFactory.getDefault())
-            .retryOnConnectionFailure(false).build()
-        try {
-            var evidence = execute(client, Request.Builder().url(target.probeUrl).head().build(), route)
-            // HEAD desteklenmiyorsa boyutu sınırlı tek GET (gövde okunmaz, ilk bayt istenir).
-            if (evidence.httpStatus == 405 || evidence.httpStatus == 501)
-                evidence = execute(client, Request.Builder().url(target.probeUrl).get().header("Range", "bytes=0-0").build(), route)
-                    .let { it.copy(requests = 2, bytes = it.bytes + evidence.bytes) }
-            evidence
-        } finally { client.dispatcher.executorService.shutdown(); client.connectionPool.evictAll() }
+        HttpPathProbe(dns = ::pinned, socketFactory = if (throughCandidate) PublicSocksSocketFactory() else SocketFactory.getDefault())
+            .probe(target.probeUrl, route)
     }
 
-    private suspend fun execute(client: OkHttpClient, request: Request, route: String): NetworkEvidence {
-        val call = client.newCall(request)
-        return try {
-            val received = suspendCancellableCoroutine<Response> { continuation ->
-                continuation.invokeOnCancellation { call.cancel() }
-                call.enqueue(object : Callback {
-                    override fun onFailure(call: Call, e: IOException) { if (continuation.isActive) continuation.resumeWithException(e) }
-                    override fun onResponse(call: Call, response: Response) { continuation.resume(response) { response.close() } }
-                })
-            }
-            received.use { response ->
-                val bytes = response.headers.toString().toByteArray(Charsets.UTF_8).size.toLong()
-                // Yönlendirme takip edilmez. Doğrulanmış TLS üzerinden gelen her HTTP
-                // yanıtı yalnızca ağ yolunun açık olduğunu gösterir; içerik başarısı değildir.
-                ProbeClassifier.fromHttp(route, response.code, response.header("Retry-After"), System.currentTimeMillis(), bytes)
-            }
-        } catch (e: CancellationException) { call.cancel(); throw e }
-        catch (e: Exception) { ProbeClassifier.fromException(route, e).copy(bytes = 262_144) }
-    }
     override fun journal(operationId: String, stage: String, candidate: CandidateDefinition?) = journal.stage(operationId, stage, candidate)
     override fun clearRecovery() = journal.clearAfterProcessRecovery()
     override fun persistResults(results: Collection<TargetResult>, planStrategyId: String?) =

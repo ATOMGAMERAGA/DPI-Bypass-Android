@@ -257,7 +257,8 @@ object SocialText {
     fun failure(cls: String): String = when (cls) {
         "DNS_FAILURE" -> "alan adı çözülemedi"
         "DNS_NON_PUBLIC_ANSWER" -> "DNS yerel/özel bir adres döndürdü (DNS müdahalesi şüphesi)"
-        "TLS_CERT_MISMATCH" -> "sertifika doğrulanamadı (araya giren sayfa ya da giriş portalı olabilir)"
+        "TLS_CERT_MISMATCH" -> "sertifika bu alan adına ait değil (araya giren sayfa ya da giriş portalı olabilir)"
+        "TLS_CERT_UNTRUSTED" -> "sertifika güvenilir değil (giriş portalı, araya giren sayfa ya da yanlış cihaz saati olabilir; DPI kesintisi değil)"
         "TLS_HANDSHAKE_FAILED", "TLS_FAILURE" -> "TLS el sıkışması kesildi (SNI/DPI müdahalesi şüphesi)"
         "TCP_REFUSED" -> "bağlantı reddedildi"
         "TCP_RESET" -> "bağlantı sıfırlandı (DPI müdahalesi şüphesi)"
@@ -442,7 +443,9 @@ object ProbeClassifier {
         val (outcome, cls) = when (e) {
             is java.net.UnknownHostException -> "FAIL" to if ("PUBLIC_TARGET_REQUIRED" in message) "DNS_NON_PUBLIC_ANSWER" else "DNS_FAILURE"
             is javax.net.ssl.SSLPeerUnverifiedException -> "FAIL" to "TLS_CERT_MISMATCH"
-            is javax.net.ssl.SSLHandshakeException -> "FAIL" to "TLS_HANDSHAKE_FAILED"
+            // Güvenilmeyen sertifika zinciri (giriş portalı, araya giren sayfa, yanlış
+            // cihaz saati) SNI/DPI kesintisinden AYRI sınıftır: aynı istisna türüyle gelir.
+            is javax.net.ssl.SSLHandshakeException -> "FAIL" to if (certificateProblem(e)) "TLS_CERT_UNTRUSTED" else "TLS_HANDSHAKE_FAILED"
             is javax.net.ssl.SSLException -> "FAIL" to "TLS_FAILURE"
             is java.net.ConnectException -> "FAIL" to "TCP_REFUSED"
             is java.net.SocketTimeoutException -> "UNKNOWN" to if ("connect" in message.lowercase()) "TCP_TIMEOUT" else "READ_TIMEOUT"
@@ -451,6 +454,9 @@ object ProbeClassifier {
         }
         return NetworkEvidence(outcome, bytes = 0, reason = "$route:$cls", failureClass = cls)
     }
+
+    private fun certificateProblem(e: Throwable): Boolean =
+        generateSequence(e) { it.cause }.take(8).any { it is java.security.cert.CertificateException || it is java.security.cert.CertPathValidatorException }
 
     /** `Retry-After`: saniye ya da HTTP-date. Geçersizse 60 sn; 1 sn..24 sa aralığına sıkıştırılır. */
     fun retryAfterSeconds(value: String?, nowMs: Long): Long {
