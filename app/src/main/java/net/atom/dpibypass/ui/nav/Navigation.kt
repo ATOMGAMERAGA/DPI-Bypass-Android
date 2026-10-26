@@ -66,15 +66,23 @@ enum class Dest(
     Settings("settings", "Ayarlar", Icons.Outlined.Settings, Icons.Rounded.Settings),
 }
 
-/** Dock'ta yer almayan alt sayfa: Ayarlar'dan açılır, gezinmede Ayarlar seçili kalır. */
+/** Dock'ta yer almayan alt sayfalar: Ayarlar'dan açılır, gezinmede Ayarlar seçili kalır. */
 const val SocialRoute = "social"
+const val SocialAdvancedRoute = "social/advanced"
+const val SocialDiagnosticsRoute = "social/diagnostics"
 
 /** Bir rotanın dock/raydaki sekmesi; alt sayfalar ait oldukları sekmeyi gösterir. */
 fun tabRouteFor(route: String?): String = when (route) {
     null -> Dest.Home.route
-    SocialRoute -> Dest.Settings.route
+    SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute -> Dest.Settings.route
     else -> route
 }
+
+/**
+ * Rehber tam ekran bir görev akışıdır: alttaki ana eylem düğmesi dock'un altında
+ * kalmasın diye dock bu sayfada gizlenir (geri ve kapat her zaman üstte).
+ */
+fun showsDock(route: String?): Boolean = route != SocialRoute
 
 // Dock'un iki durağı. Aradaki geçiş yayla sürülür; ARADA SÜREKLİ BİR DEĞER YOKTUR
 // (nedeni aşağıda, "CAM NEDEN ÖLÇEKLENMEZ" başlığında).

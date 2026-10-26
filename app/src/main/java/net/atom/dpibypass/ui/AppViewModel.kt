@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -54,7 +55,7 @@ data class NetworkInfo(
         ?: if (resolving) "Algılanıyor…" else fallback
 }
 
-class AppViewModel(app: Application) : AndroidViewModel(app) {
+class AppViewModel(app: Application) : AndroidViewModel(app), net.atom.dpibypass.ui.social.GuideBridge {
 
     private val repo = SettingsRepository(app)
 
@@ -103,8 +104,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _network = MutableStateFlow(NetworkInfo())
     val network: StateFlow<NetworkInfo> = _network.asStateFlow()
 
+    /**
+     * Sosyal Erişim bildirimlerinin bağlamı. Tek yerde hesaplanır ki rehberin
+     * açılış anındaki bağlamı ile kabul anındaki bağlamı AYNI kurala göre
+     * karşılaştırılsın (bkz. [net.atom.dpibypass.social.RouteContexts]).
+     */
+    val routeContext: StateFlow<net.atom.dpibypass.social.RouteContext?> by lazy {
+        combine(settings, network, VpnState.profile, VpnState.state,
+            net.atom.dpibypass.social.SocialAccessRuntime.coordinator.state) { s, n, profile, connection, trial ->
+            net.atom.dpibypass.social.RouteContexts.of(
+                networkResolving = n.resolving, transport = n.transport.name, ispFamily = n.isp?.family?.name,
+                contextGeneration = trial.contextGeneration, engineConnected = connection == ConnectionState.Connected,
+                engineStrategy = profile?.strategyId, trial = trial,
+                dnsKey = "${s.dohProvider.name}:${s.customDohUrl.hashCode()}", disableQuic = s.disableQuic,
+                scopeKey = "${s.appFilterMode.name}:${s.selectedApps.sorted().hashCode()}", vodafone = s.vodafoneUnlimitedMode,
+                processId = net.atom.dpibypass.social.SocialAccessRuntime.processId,
+            )
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    }
+
+    /** Son VPN izni penceresinin sonucu (rehber reddi ayrı bir düzeltme adımıyla gösterir). */
+    private val _vpnPermissionDenied = MutableStateFlow(false)
+    val vpnPermissionDenied: StateFlow<Boolean> = _vpnPermissionDenied.asStateFlow()
+    fun onVpnPermissionResult(granted: Boolean) { _vpnPermissionDenied.value = !granted }
+    fun clearVpnPermissionDenied() { _vpnPermissionDenied.value = false }
+
+    override fun routeContextNow(): net.atom.dpibypass.social.RouteContext? = routeContext.value
+    override fun settingsNow(): Settings = settings.value
+    override fun ispFamilyNow() = socialIspFamily()
+    override suspend fun saveSocialMode(mode: net.atom.dpibypass.social.TestMode) { repo.setSocialAccessMode(mode) }
+
     init {
         net.atom.dpibypass.social.SocialAccessRuntime.initialize(app)
+        net.atom.dpibypass.ui.social.SocialGuideHost.attach(this)
         refreshNetwork()
         // Sosyal Erişim açık/kapalı durumu, kaydedilmiş GERÇEK değerden izlenir.
         // `settings` StateFlow'u DataStore okunana kadar varsayılan `Settings()`
@@ -163,6 +195,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun setSocialTargetUrl(v: String) = launch { repo.setSocialTargetUrl(v) }
     fun setSocialBrowserPackage(v: String) = launch { repo.setSocialBrowserPackage(v) }
+    fun setSocialPrimary(id: String) = launch { repo.setSocialPrimary(id) }
     /** Kapsam dışındaki platform için tek adımlı düzeltme (kullanıcının açık komutu). */
     fun bringIntoScope(packages: Set<String>) = launch { repo.bringIntoScope(packages) }
     fun restoreScopeBackup() = launch { repo.restoreScopeBackup() }
@@ -171,6 +204,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()
         else net.atom.dpibypass.social.SocialAccessRuntime.coordinator.automatic()
     }
+
+    /**
+     * Yalnız tercihi kaydeder; süren ya da biten bir denemeye dokunmaz (rehberde kip,
+     * yeni tur başlatılırken o tura verilir). [setSocialAccessMode] ise süren denemeyi
+     * de o kipe geçirir (Gelişmiş ayarlar).
+     */
+    fun saveSocialModeOnly(v: net.atom.dpibypass.social.TestMode) = launch { repo.setSocialAccessMode(v) }
 
     /** Sosyal Erişim yöntem sırası: o an bağlı olunan ağın ISS ailesine göre. */
     fun socialIspFamily() = (network.value.isp ?: settings.value.selectedIsp).family
@@ -302,6 +342,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             _apps.value = list
         }
+    }
+
+    override fun onCleared() {
+        net.atom.dpibypass.ui.social.SocialGuideHost.detach(this)
+        super.onCleared()
     }
 
     private fun extraHosts(s: Settings): List<String> =

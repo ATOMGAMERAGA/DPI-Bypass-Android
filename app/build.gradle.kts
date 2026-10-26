@@ -122,6 +122,11 @@ android {
         }
     }
 
+    testOptions {
+        // Rehberin Compose arayüz testleri JVM'de Robolectric ile çalışır (cihaz gerekmez).
+        unitTests { isIncludeAndroidResources = true }
+    }
+
     lint {
         // Lint yine çalışır ve rapor üretir; ancak kozmetik bir lint "error"ı CI'ı
         // düşürmesin (native/anti-sansür yapısında yanlış-pozitifler olabilir).
@@ -187,6 +192,12 @@ dependencies {
     // Ağ yolu ölçümünü kendi yerel TLS test sunucumuzla sınamak için (gerçek platform yok).
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
+    // Rehber sayfalarının gerçek Compose arayüz testleri (Robolectric, JVM).
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

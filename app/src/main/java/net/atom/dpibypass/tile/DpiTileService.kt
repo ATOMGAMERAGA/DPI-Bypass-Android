@@ -97,7 +97,9 @@ class DpiTileService : TileService() {
             this,
             PendingIntentActivityWrapper(
                 this, 0, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE, false,
+                // Değişmezlik son parametreyle (isMutable = false) istenir; sarmalayıcı
+                // FLAG_IMMUTABLE'ı kendisi ekler. Bayrağı burada vermek sözleşmeye aykırıdır.
+                PendingIntent.FLAG_UPDATE_CURRENT, false,
             ),
         )
     }

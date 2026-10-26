@@ -90,7 +90,7 @@ class AccessRoutesTest {
         val d = AccessRoutes.decide(l, "instagram", AccessAction.ACCOUNT_ACCESS, ctx)
         assertEquals(GateCause.NETWORK_PROBLEM_SUSPECTED, d.surfaces.single().gateCause)
         assertEquals(RouteVerdict.NO_WORKING_ROUTE, d.verdict)
-        assertTrue(d.explanation.contains("ağ yolunu düzelt"))
+        assertTrue(d.explanation.contains("bağlantı yöntemlerini dene"))
     }
 
     /** Bütün yüzeyler aynı sunucu şartıyla engelliyse bu açıkça söylenir; seçenek adı değiştirip çözülmüş gösterilmez. */

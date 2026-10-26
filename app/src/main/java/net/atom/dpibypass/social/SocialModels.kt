@@ -317,6 +317,7 @@ object SocialText {
         "USER_INACTIVE" -> "Yanıt gelmediği için deneme geri alındı."
         "CONTEXT_CHANGED" -> "Ağ değişti, yeniden kontrol gerekiyor; denemeyi yeniden başlatın."
         "NETWORK_UNAVAILABLE" -> "Doğrulanmış internet bağlantısı yok; ağ gelince yeniden başlatın."
+        "KEEP_FAILED" -> "Çalışan yöntem kalıcılaştırılamadı; geri alındı ve başarı yazılmadı."
         else -> null
     }
 }

@@ -106,6 +106,8 @@ fun AppButton(
     tone: ButtonTone = ButtonTone.Primary,
     icon: ImageVector? = null,
     enabled: Boolean = true,
+    // Büyük yazı boyutunda uzun etiket kesilmesin diye rehber sayfaları satır sayısını artırır.
+    maxLines: Int = 1,
 ) {
     val scheme = MaterialTheme.colorScheme
     val stateColors = LocalStateColors.current
@@ -179,7 +181,7 @@ fun AppButton(
                     text = current,
                     style = MaterialTheme.typography.labelLarge,
                     color = contentColor,
-                    maxLines = 1,
+                    maxLines = maxLines,
                     overflow = TextOverflow.Ellipsis,
                     textAlign = TextAlign.Center,
                 )
