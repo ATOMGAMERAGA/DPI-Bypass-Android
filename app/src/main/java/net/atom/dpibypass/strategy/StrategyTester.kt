@@ -280,5 +280,18 @@ class StrategyTester(
             "gateway.discord.gg",
         )
         const val CONTROL_HOST = "cloudflare.com"
+
+        /**
+         * Roblox kuruluysa ve tünele giriyorsa otomatik seçim onun da açılmasını
+         * şart koşar. Yalnız Discord'a bakılınca Roblox'un girişini/oyuna
+         * katılmasını açmayan bir yöntem seçilebiliyor ve oyun "bazen hiç"
+         * çalışmıyordu. Oyun sunucusu (UDP) DPI'dan geçmez; engel bu HTTPS
+         * uç noktalarındadır.
+         */
+        const val ROBLOX_PACKAGE = "com.roblox.client"
+        val ROBLOX_HOSTS = listOf(
+            "www.roblox.com",
+            "apis.roblox.com",
+        )
     }
 }

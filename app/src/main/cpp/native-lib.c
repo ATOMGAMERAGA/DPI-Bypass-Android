@@ -1,5 +1,6 @@
 #include <string.h>
 #include <netdb.h>
+#include <sys/resource.h>
 
 #include <jni.h>
 #include <android/log.h>
@@ -26,10 +27,51 @@ enum hosts_mode {
     HOSTS_WHITELIST,
 };
 
+/*
+ * Süreç başına dosya tanıtıcı sınırı. ByeDPI ve hev-socks5-tunnel aynı süreçte
+ * çalışır; her TCP bağlantısı ~3, her UDP oturumu (oyun, DNS) ~5 tanıtıcı
+ * harcar. Sınır dolarsa ByeDPI'ın accept() çağrısı EMFILE ile döner ve olay
+ * döngüsü TAMAMEN kapanır: bütün uygulamaların (ör. Roblox oyunu) bağlantısı
+ * bir anda kopar. Bu yüzden yumuşak sınır, izin verilen en yükseğe çekilir.
+ */
+static rlim_t raise_nofile_limit(void) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) < 0) {
+        return 1024;
+    }
+    if (rl.rlim_cur < rl.rlim_max) {
+        rlim_t old = rl.rlim_cur;
+        rl.rlim_cur = rl.rlim_max;
+        if (setrlimit(RLIMIT_NOFILE, &rl) < 0) {
+            rl.rlim_cur = old;
+        }
+    }
+    return rl.rlim_cur == RLIM_INFINITY ? 65536 : rl.rlim_cur;
+}
+
+/*
+ * Varsayılan 512 bağlantılık havuz, "tüm uygulamalar" kipinde DNS sorguları
+ * (her biri ayrı UDP oturumu, ~60 sn yaşar) ve oyunların çok sayıda HTTPS
+ * isteğiyle kolayca dolar; dolunca yeni bağlantılar reddedilir. Havuz, tanıtıcı
+ * sınırının taşmayacağı kadar büyütülür. Kullanıcı -c ile kendisi verdiyse
+ * dokunulmaz.
+ */
+static void tune_max_open(rlim_t nofile) {
+    if (params.max_open != default_params.max_open) {
+        return;
+    }
+    // ByeDPI ~2, tünel ~1 tanıtıcı/yuva; JVM ve diğerleri için 512 pay.
+    long fit = ((long) nofile - 512) / 3;
+    if (fit > 4096) fit = 4096;
+    if (fit < 128) fit = 128;
+    params.max_open = (int) fit;
+}
+
 JNIEXPORT jint JNI_OnLoad(
         __attribute__((unused)) JavaVM *vm,
         __attribute__((unused)) void *reserved) {
     default_params = params;
+    raise_nofile_limit();
     return JNI_VERSION_1_6;
 }
 
@@ -52,10 +94,14 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniCreateSocketWithCommandLine(
         uniperror("parse_args");
         return -1;
     }
+    tune_max_open(raise_nofile_limit());
+    LOG(LOG_S, "max_open: %d", params.max_open);
 
     int fd = listen_socket((struct sockaddr_ina *)&params.laddr);
     if (fd < 0) {
         uniperror("listen_socket");
+        // Yarım kalan argümanlar bir sonraki denemeye taşınmasın.
+        reset_params();
         return -1;
     }
     LOG(LOG_S, "listen_socket, fd: %d", fd);
@@ -285,7 +331,10 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniStopProxy(
         jint fd) {
     LOG(LOG_S, "stop_proxy, fd: %d", fd);
 
-    int res = shutdown(fd, SHUT_RDWR);
+    // fd < 0: olay döngüsü kendiliğinden bitti ve dinleme soketini zaten
+    // kapattı. O numara artık başka bir sokete (ör. tünelin) ait olabilir;
+    // shutdown edilmez, yalnızca parametreler sıfırlanır.
+    int res = fd >= 0 ? shutdown(fd, SHUT_RDWR) : 0;
     reset_params();
 
     if (res < 0) {
