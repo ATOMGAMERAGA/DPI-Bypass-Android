@@ -1,6 +1,40 @@
-# Sosyal Erişim Deneyleri — Alpha (Android)
+# Sosyal Erişim — Alpha (Android)
 
-> **Güncel davranış: "Revizyon — 26 Ekim 2026 (2): adım adım rehber" aşağıdadır.** Eski tek sayfalık ekranı (Durum · Uygulamalar · Erişim yolu kartı · Seçenekler · Başlat · Deneme · Tanılama) anlatan bölümler tarihsel kayıttır; o ekrandaki düğmeler artık yoktur, karşılıkları aşağıdaki eşleme tablosundadır. Bu revizyonda da **gerçek cihaz/operatör/hesap doğrulaması yoktur**.
+## Revizyon — 27 Ekim 2026: e-Devlet doğrulaması olmadan erişim (yurt dışı çıkış)
+
+**Amaç:** Instagram, X, TikTok gibi platformları Türkiye'de e-Devlet kimlik doğrulaması istenmeden kullanabilmek. Önceki sürümler yalnız DPI engelini aşmaya çalışıyordu; platformlar doğrulamayı bağlantının geldiği ülkeye (IP) göre istediği için bu amaca hiç yaklaşmıyordu.
+
+### Ne değişti
+
+- **Yeni sekme:** Alt gezinmede **Sosyal Erişim** (Durum'un yanında). Ana ekranda ve Ayarlar'da da "e-Devlet doğrulaması olmadan" satırı aynı sayfayı açar.
+- **Ekran düzeni:** üstte tek bakışta durum kartı (Kapalı / Platform seç / Sunucu gerekli / Hazır — bağlan / 🇩🇪 Almanya üzerinden / Sunucu Türkiye'de / Sunucuya ulaşılamıyor), canlı sayaçlar (yurt dışından geçen ve kesilen bağlantılar, son yurt dışı alan adı), ardından "Nasıl çalışır" şeması (Telefon → Sunucu → Platform) ve üç adım: **1 · Platformları seç**, **2 · Yurt dışı sunucu** (adres + "Sunucuyu test et"), **3 · Bağlan**. Altta "Doğrulama yine çıkarsa" (konum izni, oturumu yeniden açma, +90 numara/SIM, sunucu sahibinin görebildikleri) ve "Ek alan adları".
+- **Eski adım adım DPI rehberi** kaldırılmadı; "Platform hiç açılmıyor mu? → Bağlantı sorunu rehberi" olarak bu sayfadan ve Ayarlar'dan açılır. Aşağıdaki bölümler o rehberi anlatır.
+
+### Nasıl çalışır (teknik)
+
+```
+TUN -> hev-socks5-tunnel -> ExitRouter (127.0.0.1:1081)
+                              |-- platform alan adı --> yurt dışı SOCKS5/HTTP proxy --> platform
+                              '-- diğer her şey -----> ByeDPI (127.0.0.1:1080) --> İnternet
+```
+
+- `vpn/ExitRouter.kt`: yerel SOCKS5 yönlendirici. 443/80 portlu bağlantılarda ilk paketi okur (`social/ForeignExit.kt` → `Sniff`: TLS ClientHello SNI ya da HTTP Host), alan adı seçili platformlardan biriyse (`ExitMatcher`, alt alan adları dahil) bağlantıyı alan adıyla yurt dışı sunucuya açar (`social/ExitConnector.kt`; ad çözümlemesi sunucuda yapılır), değilse isteği ve okunan baytları aynen ByeDPI'a iletir — desync stratejisi eskisi gibi çalışır. Diğer portlar doğrudan ByeDPI'a geçer.
+- **Sızıntı kuralları:** yurt dışı sunucuya ulaşılamazsa bağlantı kesilir, doğrudan yola düşülmez; UDP/443 (QUIC) düşürülür ki uygulamalar ayrıştırılabilen TLS'e dönsün (DNS, oyun, ses UDP'si ByeDPI'a iletilir); yurt dışı çıkış açıkken IPv6 da tünele alınır.
+- **Çıkış ülkesi:** `ExitProbe` sunucu üzerinden `https://www.cloudflare.com/cdn-cgi/trace` açar ve `loc=` alanını okur. Bağlanınca otomatik, "Sunucuyu test et" ile elle çalışır. `TR` çıkarsa ekran sunucuyu reddeder.
+- Ayarlar: `exitEnabled`, `exitServer`, `exitPlatforms`, `exitExtraDomains`; değişince tünel `TunnelConfig.exit` üzerinden yeniden kurulur.
+- Uygulama kapsamı seçili platform uygulamalarını tünele almıyorsa ekran uyarır ve tek dokunuşla tünele alır.
+
+### Sınırlar (ekranda da yazar)
+
+- Uygulama sunucu sağlamaz; kullanıcı kendi ya da güvendiği bir SOCKS5/HTTP proxy'yi girer. Sunucu sahibi hangi platforma bağlanıldığını görür; içerik TLS ile şifreli kalır.
+- Platform IP dışında GPS konumu, SIM/uygulama mağazası bölgesi, +90 telefon numarası ya da önceden başlatılmış doğrulamaya da bakabilir; bunları hiçbir bağlantı ayarı değiştiremez.
+- Kendi protokolüyle doğrudan IP'ye bağlanan mesajlaşma uygulamaları (WhatsApp, Telegram, Signal) alan adıyla ayrıştırılamaz; listede yoktur.
+- ECH kullanan sitelerde dış SNI gerçek alan adı olmadığından eşleşme olmaz (listedeki platformlar şu an ECH kullanmıyor).
+- Gerçek cihaz/operatör/hesap doğrulaması yapılmadı. Yönlendirici gerçek soketlerle birim testlidir (`ForeignExitTest`), ekran durumları `SocialExitScreenshotTest` ile çizilir; sunucu testi gerçek bir HTTP proxy üzerinden çalıştırıldı.
+
+---
+
+> **Bağlantı sorunu rehberinin güncel davranışı: "Revizyon — 26 Ekim 2026 (2): adım adım rehber" aşağıdadır.** Eski tek sayfalık ekranı (Durum · Uygulamalar · Erişim yolu kartı · Seçenekler · Başlat · Deneme · Tanılama) anlatan bölümler tarihsel kayıttır; o ekrandaki düğmeler artık yoktur, karşılıkları aşağıdaki eşleme tablosundadır. Bu revizyonda da **gerçek cihaz/operatör/hesap doğrulaması yoktur**.
 
 ## Revizyon — 26 Ekim 2026 (2): adım adım rehber (temel: `224e048`, PR #17 merge)
 

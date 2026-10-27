@@ -62,6 +62,12 @@ data class Settings(
     val socialPrimaryPlatform: String = "",
     // "Sadece Discord" öncesindeki uygulama kapsamı yedeği var mı? (geri alınabilir)
     val scopeBackupAvailable: Boolean = false,
+    // Yurt dışı çıkış: seçili platformların trafiği bu sunucudan çıkar ki platform
+    // Türkiye IP'si görmesin ve e-Devlet doğrulaması istemesin (bkz. social/ForeignExit).
+    val exitEnabled: Boolean = false,
+    val exitServer: String = "",
+    val exitPlatforms: Set<String> = emptySet(),
+    val exitExtraDomains: String = "",
     /**
      * Değer DataStore'dan GERÇEKTEN okundu mu? `stateIn` başlangıç değeri olan
      * varsayılan `Settings()` için false'tur: arayüz o ilk değeri kullanıcının
@@ -154,6 +160,11 @@ class SettingsRepository(
         socialPrimaryPlatform = runCatching { this[Keys.SOCIAL_PRIMARY] }.getOrNull()
             ?.takeIf { net.atom.dpibypass.social.SocialPlatform.byId(it) != null } ?: "",
         scopeBackupAvailable = this[Keys.SCOPE_BACKUP_MODE] != null,
+        exitEnabled = this[Keys.EXIT_ENABLED] ?: false,
+        exitServer = this[Keys.EXIT_SERVER] ?: "",
+        exitPlatforms = this[Keys.EXIT_PLATFORMS]
+            ?.filter { net.atom.dpibypass.social.ExitPlatform.byId(it) != null }?.toSet() ?: emptySet(),
+        exitExtraDomains = this[Keys.EXIT_EXTRA_DOMAINS] ?: "",
         loaded = true,
     )
 
@@ -228,6 +239,12 @@ class SettingsRepository(
     suspend fun setSocialTargetUrl(v: String) = put(Keys.SOCIAL_TARGET_URL, v.take(2048))
     suspend fun setSocialBrowserPackage(v: String) = put(Keys.SOCIAL_BROWSER, v.take(255))
 
+    suspend fun setExitEnabled(v: Boolean) = put(Keys.EXIT_ENABLED, v)
+    suspend fun setExitServer(v: String) = put(Keys.EXIT_SERVER, v.trim().take(1024))
+    suspend fun setExitExtraDomains(v: String) = put(Keys.EXIT_EXTRA_DOMAINS, v.take(4096))
+    suspend fun updateExitPlatforms(transform: (Set<String>) -> Set<String>) =
+        store.edit { it[Keys.EXIT_PLATFORMS] = transform(it[Keys.EXIT_PLATFORMS] ?: emptySet()) }
+
     /** Birincil uygulama seçimi; seçili platformlara da eklenir (tek atomik yazım). */
     suspend fun setSocialPrimary(id: String) = store.edit {
         it[Keys.SOCIAL_PRIMARY] = id
@@ -281,6 +298,10 @@ class SettingsRepository(
         store.edit { it[key] = value }
 
     private object Keys {
+        val EXIT_ENABLED = booleanPreferencesKey("exit_enabled")
+        val EXIT_SERVER = stringPreferencesKey("exit_server")
+        val EXIT_PLATFORMS = stringSetPreferencesKey("exit_platforms")
+        val EXIT_EXTRA_DOMAINS = stringPreferencesKey("exit_extra_domains")
         val SOCIAL_ENABLED = booleanPreferencesKey("social_access_enabled")
         val SOCIAL_MODE = stringPreferencesKey("social_access_mode")
         val SOCIAL_PLATFORMS = stringSetPreferencesKey("social_access_platforms")

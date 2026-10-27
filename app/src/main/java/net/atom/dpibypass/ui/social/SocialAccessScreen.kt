@@ -95,17 +95,27 @@ import net.atom.dpibypass.ui.design.VSpace
 private val BusyPhases = setOf(Phase.BASELINING, Phase.SELECTING, Phase.PREPARING, Phase.APPLYING,
     Phase.PROBING, Phase.CANCELLING, Phase.ROLLING_BACK)
 
-/** Ayarlar'daki tek satırlık giriş: kısa durum + rehbere geçiş. */
+/** Ayarlar'daki giriş: asıl özellik (yurt dışı çıkış) + bağlantı sorunu rehberi. */
 @Composable
-fun SocialAccessEntry(viewModel: AppViewModel, onOpen: () -> Unit) {
+fun SocialAccessEntry(viewModel: AppViewModel, onOpen: () -> Unit, onOpenExit: () -> Unit = {}) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val state by SocialAccessRuntime.coordinator.state.collectAsStateWithLifecycle()
     SectionHeader("Sosyal erişim")
     AppCard(modifier = Modifier.fillMaxWidth()) {
         ListRow(
-            title = "Bir uygulama açılmıyor mu?",
-            subtitle = entrySummary(settings.socialAccessEnabled, settings.socialPrimaryPlatform, state),
+            title = "e-Devlet doğrulaması olmadan",
+            subtitle = if (settings.exitEnabled) "Yurt dışı çıkış açık · ${settings.exitPlatforms.size} platform"
+            else "Seçili platformlar yurt dışı sunucudan bağlansın; kimlik doğrulaması istenmesin.",
             icon = Icons.Rounded.Public,
+            onClick = onOpenExit,
+            modifier = Modifier.testTag("exit-entry"),
+            trailing = { Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+        )
+        RowDivider()
+        ListRow(
+            title = "Bir uygulama hiç açılmıyor mu?",
+            subtitle = entrySummary(settings.socialAccessEnabled, settings.socialPrimaryPlatform, state),
+            icon = Icons.Rounded.Route,
             onClick = onOpen,
             modifier = Modifier.testTag("social-entry"),
             trailing = {

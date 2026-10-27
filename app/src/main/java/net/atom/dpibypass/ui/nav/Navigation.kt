@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Tune
@@ -61,12 +63,13 @@ enum class Dest(
     val iconSelected: ImageVector,
 ) {
     Home("home", "Durum", Icons.Outlined.Shield, Icons.Rounded.Shield),
+    Social("social-access", "Sosyal Erişim", Icons.Outlined.Public, Icons.Rounded.Public),
     Mode("mode", "Strateji", Icons.Outlined.Tune, Icons.Rounded.Tune),
     Apps("apps", "Uygulamalar", Icons.Outlined.Apps, Icons.Rounded.Apps),
     Settings("settings", "Ayarlar", Icons.Outlined.Settings, Icons.Rounded.Settings),
 }
 
-/** Dock'ta yer almayan alt sayfalar: Ayarlar'dan açılır, gezinmede Ayarlar seçili kalır. */
+/** Dock'ta yer almayan alt sayfalar: Sosyal Erişim'e aittir, gezinmede o sekme seçili kalır. */
 const val SocialRoute = "social"
 const val SocialAdvancedRoute = "social/advanced"
 const val SocialDiagnosticsRoute = "social/diagnostics"
@@ -74,7 +77,7 @@ const val SocialDiagnosticsRoute = "social/diagnostics"
 /** Bir rotanın dock/raydaki sekmesi; alt sayfalar ait oldukları sekmeyi gösterir. */
 fun tabRouteFor(route: String?): String = when (route) {
     null -> Dest.Home.route
-    SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute -> Dest.Settings.route
+    SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute -> Dest.Social.route
     else -> route
 }
 
