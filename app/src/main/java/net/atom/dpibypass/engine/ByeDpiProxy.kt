@@ -24,6 +24,9 @@ class ByeDpiProxy {
 
     private val mutex = Mutex()
     private var fd = -1
+    // Olay döngüsü kendiliğinden bitti (ör. tanıtıcı sınırı); dinleme soketi
+    // native tarafta zaten kapandı.
+    private var loopEnded = false
 
     /**
      * Verilen ByeDPI argümanlarıyla dinleme soketini kurar ve olay döngüsünü
@@ -37,7 +40,11 @@ class ByeDpiProxy {
         if (socketFd < 0) {
             return -1
         }
-        return jniStartProxy(socketFd)
+        val code = jniStartProxy(socketFd)
+        // stopProxy ile durdurulduysa fd çoktan sıfırlanmıştır; değilse döngü
+        // kendi kendine bitmiştir ve o fd numarası artık bize ait değildir.
+        mutex.withLock { if (fd == socketFd) loopEnded = true }
+        return code
     }
 
     /** Çalışan proxy'yi durdurur (dinleme soketini kapatır, native paramları sıfırlar). */
@@ -45,9 +52,10 @@ class ByeDpiProxy {
         if (fd < 0) {
             throw IllegalStateException("Proxy çalışmıyor")
         }
-        val result = jniStopProxy(fd)
+        val result = jniStopProxy(if (loopEnded) -1 else fd)
         if (result == 0) {
             fd = -1
+            loopEnded = false
         }
         result
     }

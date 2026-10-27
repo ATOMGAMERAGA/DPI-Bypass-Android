@@ -175,7 +175,8 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}, onOp
             RowDivider()
             SwitchRow(
                 title = "UDP/QUIC'i tünelde düşür",
-                subtitle = "Kapalı tutun. Açarsanız Discord'da sesli sohbet çalışmaz ve " +
+                subtitle = "Kapalı tutun. Açarsanız Roblox gibi oyunlar sunucuya bağlanamaz, " +
+                    "Discord'da sesli sohbet çalışmaz ve " +
                     "seçtiğiniz DNS'e ulaşılamaz (DNS sorguları da UDP'dir); yalnızca " +
                     "QUIC yüzünden takılan nadir durumlar için vardır.",
                 icon = Icons.Rounded.Block,

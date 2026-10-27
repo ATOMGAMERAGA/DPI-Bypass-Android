@@ -33,6 +33,7 @@ Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildi
 | Bağlandı ama hedef uygulama açılmıyor | **Uygulamalar** sekmesinde hedef uygulamanın kapsama girdiğini kontrol et. Ardından **Mod** sekmesinde otomatik yöntemi dene. |
 | DNS veya sesli görüşme bozuldu | **Ayarlar** bölümündeki **UDP/QUIC'i tünelde düşür** seçeneğini kapat. Bu ayar DNS sorgularını ve UDP kullanan görüşmeleri etkileyebilir. |
 | Telefon uygulamayı arka planda durduruyor | **Ayarlar** bölümündeki pil optimizasyonu yönlendirmesini kullan. Gerekirse uygulamayı tekrar açıp bağlan. |
+| Oyunda (ör. Roblox) "bağlantı kesildi" uyarısı ya da oyuna girilemiyor | **Ayarlar**'da **UDP/QUIC'i tünelde düşür** kapalı olmalı; oyun sunucusu UDP kullanır. Roblox kuruluysa ve tünele giriyorsa otomatik mod yöntemi Roblox'ta da doğrular; güncellemeden sonra bağlantıyı bir kez kapatıp aç. |
 | Ağ değişince bağlantı bozuldu | Bağlantıyı kapatıp yeniden aç; otomatik mod yeni ağ için yöntemi tekrar değerlendirsin. |
 | Bir uygulama çalışıyor, diğeri açılmıyor | **Ayarlar → Bir uygulama açılmıyor mu?** rehberini aç: açılmayan uygulamayı seç, çalışmaya devam etmesi gerekenleri **Başka uygulamalar da sorunsuz kalsın**'da işaretle. Çalışan uygulamayı bozan bir yöntem otomatik reddedilir. Uygulama bağlantının dışındaysa rehber onu eklemeyi önerir. |
 

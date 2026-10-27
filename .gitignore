@@ -25,3 +25,6 @@ keystore.properties
 # Yayın çıktıları (release.yml burada APK üretir)
 /dist/
 /.local-tools/
+
+# Kotlin derleyici oturum verisi
+.kotlin/

@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +40,6 @@ import net.atom.dpibypass.strategy.Strategy
 import net.atom.dpibypass.strategy.StrategyPool
 import net.atom.dpibypass.strategy.StrategyScore
 import net.atom.dpibypass.strategy.StrategyTester
-import net.atom.dpibypass.strategy.Socks5TestClient
 import net.atom.dpibypass.util.NotificationUtils
 import net.atom.dpibypass.util.shellSplit
 import java.io.File
@@ -388,7 +388,8 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         // Çoklu uygulama: Sosyal Erişim'de seçili platformların alan adları da aynı
         // doğrulamaya girer; kazanan hepsine birlikte bakılarak seçilir.
         val social = if (settings.socialAccessEnabled) SocialAccessRuntime.probeHosts(settings.socialPlatforms) else emptyList()
-        val hosts = (StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings) + social).distinct()
+        val games = if (robloxInTunnel(settings)) StrategyTester.ROBLOX_HOSTS else emptyList()
+        val hosts = (StrategyTester.DEFAULT_BLOCKED_HOSTS + extraHosts(settings) + social + games).distinct()
         currentNetworkKey = networkKey
 
         // --- 1. aşama: hatırlanan kazananı doğrula ---
@@ -424,6 +425,10 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         Log.w(TAG, "Otomatik test hiçbir çalışan strateji bulamadı; ilk preset kullanılıyor")
         return ConnectionPlan(ordered.first(), null, ispName)
     }
+
+    private fun robloxInTunnel(settings: Settings): Boolean =
+        runCatching { packageManager.getApplicationInfo(StrategyTester.ROBLOX_PACKAGE, 0) }.isSuccess &&
+            AppScope.covers(settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, StrategyTester.ROBLOX_PACKAGE)
 
     private fun extraHosts(settings: Settings): List<String> =
         settings.extraBlockedHosts
@@ -463,9 +468,13 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         if (tunFd != null) throw IllegalStateException("TUN zaten açık")
 
         val udpLine = if (settings.disableQuic) "" else "\n  udp: 'udp'"
+        // connect-timeout: SOCKS el sıkışması ByeDPI'ın uzak sunucuya TCP
+        // bağlantısını da kapsar; mobil ağda 5 sn'lik varsayılan, oyunun giriş
+        // isteklerini zayıf çekimde gereksiz yere düşürüyordu.
         val config = """
             |misc:
             |  task-stack-size: 81920
+            |  connect-timeout: 10000
             |socks5:
             |  mtu: 8500
             |  address: 127.0.0.1
@@ -574,44 +583,29 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
     // ---- watchdog ----
 
+    /**
+     * Motoru yalnızca KENDİSİ bozulduğunda toparlar (bkz. [ProxyWatchdogPolicy]).
+     * Olay döngüsünün bitişi `join` ile anında yakalanır; eskiden bu 2 dakikaya
+     * kadar sürüyordu ve tüm uygulamalar o süre bağlantısız kalıyordu.
+     */
     private fun startWatchdog() {
         watchdogJob?.cancel()
+        val policy = ProxyWatchdogPolicy()
         watchdogJob = lifecycleScope.launch(Dispatchers.IO) {
-            var failures = 0
-            var backoff = 2000L
             while (isActive && !stopping) {
-                delay(HEALTH_CHECK_INTERVAL_MS)
+                val job = proxyJob
+                if (job?.isActive == true) withTimeoutOrNull(LISTENER_PROBE_INTERVAL_MS) { job.join() }
+                else delay(DEAD_RECHECK_MS)
                 if (stopping) break
-
-                val proxyDead = proxyJob?.isActive != true
-                val healthy = !proxyDead && healthCheck()
-
-                if (healthy) {
-                    failures = 0
-                    backoff = 2000L
-                } else {
-                    failures++
-                    Log.w(TAG, "Watchdog: sağlıksız (proxyDead=$proxyDead, ardışık=$failures)")
-                    if (failures >= 2) {
-                        Log.w(TAG, "Watchdog: proxy yeniden başlatılıyor (backoff=${backoff}ms)")
-                        restartProxy()
-                        delay(backoff)
-                        backoff = (backoff * 2).coerceAtMost(30_000L)
-                        failures = 0
-                    }
+                // Strateji/ayar değişimi motoru o an kendisi yeniden kuruyor.
+                if (mutex.isLocked) continue
+                val alive = proxyJob?.isActive == true
+                val responds = alive && ProxyListenerProbe.responds(PROXY_PORT)
+                if (policy.observe(alive, responds, SystemClock.elapsedRealtime()) == ProxyWatchdogPolicy.Action.Restart) {
+                    Log.w(TAG, "Watchdog: motor ${if (alive) "yanıt vermiyor" else "durmuş"}; yeniden başlatılıyor")
+                    restartProxy()
                 }
             }
-        }
-    }
-
-    /** Kontrol domaine tünel üzerinden bağlanabiliyor muyuz? */
-    private fun healthCheck(): Boolean {
-        return try {
-            val doh = DohResolver(currentDohUrl)
-            val ip = doh.resolve(StrategyTester.CONTROL_HOST).firstOrNull() ?: return false
-            Socks5TestClient.testTls(PROXY_PORT, ip, StrategyTester.CONTROL_HOST, timeoutMs = 4000) != null
-        } catch (e: Exception) {
-            false
         }
     }
 
@@ -747,7 +741,11 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         const val ACTION_STOP = "net.atom.dpibypass.STOP"
         const val PROXY_PORT = 1080
         private const val DEFAULT_DNS = "1.1.1.1"
-        private const val HEALTH_CHECK_INTERVAL_MS = 60_000L
+        /** Motor yaşarken yerel dinleyicinin yoklanma aralığı (yalnız loopback). */
+        private const val LISTENER_PROBE_INTERVAL_MS = 15_000L
+
+        /** Motor durmuşken yeniden başlatma için tekrar bakma aralığı. */
+        private const val DEAD_RECHECK_MS = 1_000L
 
         /**
          * Ayar değişikliğinden sonra tünelin yeniden kurulması için beklenen süre.
