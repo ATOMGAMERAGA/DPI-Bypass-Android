@@ -57,6 +57,7 @@ import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
 import net.atom.dpibypass.ui.settings.SettingsScreen
 import net.atom.dpibypass.ui.social.SocialAdvancedScreen
 import net.atom.dpibypass.ui.social.SocialDiagnosticsScreen
+import net.atom.dpibypass.ui.social.SocialExitScreen
 import net.atom.dpibypass.ui.social.SocialGuideScreen
 import net.atom.dpibypass.ui.theme.DpiBypassTheme
 import net.atom.dpibypass.util.DeviceInfo
@@ -248,6 +249,13 @@ private fun AppRoot(
                         onRequestTile = onRequestTile,
                     )
                 }
+                composable(Dest.Social.route) {
+                    SocialExitScreen(
+                        viewModel = viewModel,
+                        onConnect = onConnect,
+                        onOpenGuide = { navController.navigate(SocialRoute) { launchSingleTop = true } },
+                    )
+                }
                 composable(Dest.Mode.route) { ModeScreen(viewModel) }
                 composable(Dest.Apps.route) { AppsScreen(viewModel) }
                 composable(Dest.Settings.route) {
@@ -255,6 +263,12 @@ private fun AppRoot(
                         viewModel,
                         onRequestTile = onRequestTile,
                         onOpenSocial = { navController.navigate(SocialRoute) { launchSingleTop = true } },
+                        onOpenExit = {
+                            navController.navigate(Dest.Social.route) {
+                                popUpTo(Dest.Home.route)
+                                launchSingleTop = true
+                            }
+                        },
                     )
                 }
                 val openTab: (String) -> Unit = { route ->

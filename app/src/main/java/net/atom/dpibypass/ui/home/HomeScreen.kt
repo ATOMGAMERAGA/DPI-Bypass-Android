@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Forum
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Tune
@@ -38,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -55,6 +57,9 @@ import net.atom.dpibypass.ui.design.ContentMaxWidth
 import net.atom.dpibypass.ui.design.DockSpacing
 import net.atom.dpibypass.ui.design.IconBubble
 import net.atom.dpibypass.ui.design.ListRow
+import net.atom.dpibypass.social.Countries
+import net.atom.dpibypass.ui.social.ExitHeadline
+import net.atom.dpibypass.ui.social.ExitView
 import net.atom.dpibypass.ui.design.LocalChrome
 import net.atom.dpibypass.ui.design.LocalTabletLayout
 import net.atom.dpibypass.ui.design.PublishScroll
@@ -338,7 +343,33 @@ fun HomeScreen(
                     }
                 }
 
-                // 5 — Hızlı işlemler
+                // 5 — Sosyal Erişim: e-Devlet doğrulaması olmadan platformlar
+                SectionHeader("Sosyal erişim", modifier = Modifier.entrance(entrance, 4))
+                val exitProbe by viewModel.exitProbe.collectAsStateWithLifecycle()
+                val exitStatus by viewModel.exitStatus.collectAsStateWithLifecycle()
+                val exitHeadline = ExitView.headline(settings, state, exitStatus, exitProbe)
+                AppCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .entrance(entrance, 4)
+                        .testTag("home-exit"),
+                    tone = when (exitHeadline) {
+                        ExitHeadline.WORKING -> CardTone.Accent
+                        ExitHeadline.SERVER_DOWN,
+                        ExitHeadline.SERVER_IN_TURKEY -> CardTone.Danger
+                        else -> CardTone.Plain
+                    },
+                    onClick = { onNavigate(Dest.Social.route) },
+                ) {
+                    ListRow(
+                        title = "e-Devlet doğrulaması olmadan",
+                        subtitle = homeExitLine(exitHeadline, exitProbe?.countryCode, settings.exitPlatforms.size),
+                        icon = Icons.Rounded.Public,
+                        onClick = { onNavigate(Dest.Social.route) },
+                    )
+                }
+
+                // 6 — Hızlı işlemler
                 SectionHeader("Hızlı işlemler", modifier = Modifier.entrance(entrance, 4))
                 Column(
                     modifier = Modifier
@@ -389,15 +420,20 @@ fun HomeScreen(
                     }
                 }
 
-                // 6 — Şeffaflık kartı
+                // 7 — Şeffaflık kartı
                 SectionHeader("Bu uygulama ne yapar", modifier = Modifier.entrance(entrance, 5))
                 AppCard(modifier = Modifier
                     .fillMaxWidth()
                     .entrance(entrance, 5)) {
                     ListRow(
                         title = "Trafik cihazından çıkmadan düzenlenir",
-                        subtitle = "Uzak sunucuya yönlendirme yok; yalnızca ilk paketler yerelde bölünür. " +
-                            "Bu yüzden hız düşmez, ping artmaz.",
+                        subtitle = if (settings.exitEnabled) {
+                            "Sosyal Erişim'de seçtiğin platformlar hariç: onlar senin verdiğin yurt dışı sunucudan çıkar. " +
+                                "Geri kalan her şeyde yalnızca ilk paketler yerelde bölünür."
+                        } else {
+                            "Uzak sunucuya yönlendirme yok; yalnızca ilk paketler yerelde bölünür. " +
+                                "Bu yüzden hız düşmez, ping artmaz."
+                        },
                         icon = Icons.Rounded.CallSplit,
                     )
                     RowDivider()
@@ -420,6 +456,21 @@ fun HomeScreen(
         }
     }
 }
+
+/** Ana ekrandaki Sosyal Erişim satırının tek cümlelik özeti. */
+private fun homeExitLine(headline: ExitHeadline, country: String?, platforms: Int): String =
+    when (headline) {
+        ExitHeadline.OFF -> "Kapalı · Instagram, X, TikTok gibi platformları yurt dışından bağla"
+        ExitHeadline.NEED_PLATFORMS -> "Platform seçilmedi"
+        ExitHeadline.NEED_SERVER -> "Yurt dışı sunucu adresi gerekli"
+        ExitHeadline.NEED_CONNECT -> "Hazır · bağlanınca $platforms platform yurt dışından çıkar"
+        ExitHeadline.APPLYING, ExitHeadline.CHECKING -> "Çıkış kontrol ediliyor…"
+        ExitHeadline.WORKING -> country.orEmpty().let {
+            "${Countries.flag(it)} ${Countries.name(it)} üzerinden · $platforms platform".trim()
+        }
+        ExitHeadline.SERVER_IN_TURKEY -> "Sunucu Türkiye'de; doğrulama yine istenir"
+        ExitHeadline.SERVER_DOWN -> "Sunucuya ulaşılamıyor; platform bağlantıları kesildi"
+    }
 
 /** Hızlı işlem kartı: büyük dokunma alanı, ikon + iki satır metin. */
 @Composable

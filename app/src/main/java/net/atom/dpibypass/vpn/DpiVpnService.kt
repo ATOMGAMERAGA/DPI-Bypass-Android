@@ -44,6 +44,8 @@ import net.atom.dpibypass.util.NotificationUtils
 import net.atom.dpibypass.util.shellSplit
 import java.io.File
 import net.atom.dpibypass.social.AlphaEngine
+import net.atom.dpibypass.social.ExitProbe
+import net.atom.dpibypass.social.ExitStatusBoard
 import net.atom.dpibypass.social.SocialAccessRuntime
 import net.atom.dpibypass.social.IneligibleCandidate
 import org.json.JSONArray
@@ -69,6 +71,9 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     private var watchdogJob: Job? = null
     private var settingsJob: Job? = null
     private var tunFd: ParcelFileDescriptor? = null
+    // Yurt dışı çıkış açıkken hev ile ByeDPI arasındaki yönlendirici (bkz. ExitRouter).
+    private var exitRouter: ExitRouter? = null
+    private var exitProbeJob: Job? = null
     private val mutex = Mutex()
     private var stopping = false
 
@@ -468,6 +473,13 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         if (tunFd != null) throw IllegalStateException("TUN zaten açık")
 
         val udpLine = if (settings.disableQuic) "" else "\n  udp: 'udp'"
+        // Yurt dışı çıkış: hev ByeDPI yerine yönlendiriciye bağlanır; yönlendirici
+        // platform bağlantılarını yurt dışı sunucuya, gerisini ByeDPI'a iletir.
+        val exit = ExitConfig.from(settings)
+        val socksPort = if (exit != null) {
+            exitRouter = ExitRouter(ROUTER_PORT, PROXY_PORT, exit.server, exit.matcher) { Log.w(TAG, it) }.also { it.start() }
+            ROUTER_PORT
+        } else PROXY_PORT
         // connect-timeout: SOCKS el sıkışması ByeDPI'ın uzak sunucuya TCP
         // bağlantısını da kapsar; mobil ağda 5 sn'lik varsayılan, oyunun giriş
         // isteklerini zayıf çekimde gereksiz yere düşürüyordu.
@@ -478,7 +490,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             |socks5:
             |  mtu: 8500
             |  address: 127.0.0.1
-            |  port: $PROXY_PORT$udpLine
+            |  port: $socksPort$udpLine
         """.trimMargin()
 
         val configFile = File.createTempFile("tun2socks", ".yml", cacheDir).apply {
@@ -490,6 +502,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             ?: throw IllegalStateException("VPN establish() null döndü")
         tunFd = fd
         TProxyService.TProxyStartService(configFile.absolutePath, fd.fd)
+        exit?.let { probeExit(it) }
         // Arayüze ancak TUN gerçekten kurulduktan sonra "etkin" denir; niyet ile
         // sonucu ayırmak, "seçtim ama olmadı" durumunun görünmesini sağlar.
         VpnState.updateDns(applied, dnsPlan?.label.orEmpty())
@@ -503,6 +516,23 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         }
         tunFd?.close()
         tunFd = null
+        exitProbeJob?.cancel()
+        exitProbeJob = null
+        exitRouter?.close()
+        exitRouter = null
+    }
+
+    /**
+     * Çıkış ülkesini bağlanır bağlanmaz ölçer: sunucu Türkiye'deyse ya da
+     * ulaşılamıyorsa kullanıcı bunu Sosyal Erişim ekranında hemen görür.
+     */
+    private fun probeExit(exit: ExitConfig) {
+        exitProbeJob?.cancel()
+        ExitStatusBoard.probed(null)
+        exitProbeJob = lifecycleScope.launch(Dispatchers.IO) {
+            val result = ExitProbe.check(exit.server)
+            if (isActive) ExitStatusBoard.probed(result)
+        }
     }
 
     /** [appliedDns], gerçekten kabul edilen DNS adresleriyle doldurulur. */
@@ -511,7 +541,9 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         builder.setSession(getString(R.string.app_name))
         builder.addAddress("10.10.10.10", 32)
         builder.addRoute("0.0.0.0", 0)
-        if (VodafoneModePolicy.captureIpv6(settings.vodafoneUnlimitedMode)) {
+        // Yurt dışı çıkışta IPv6 da tünele alınır: aksi hâlde platform IPv6 üzerinden
+        // tünelin yanından geçer ve Türkiye adresini görür.
+        if (VodafoneModePolicy.captureIpv6(settings.vodafoneUnlimitedMode) || ExitConfig.from(settings) != null) {
             // IPv6 hotspot'ta ikinci bir kaynak adresi gösterebilir. Tam rota
             // TUN'a girer; ByeDPI -X ile genel IPv6 çıkışını reddeder.
             builder.addAddress("fd00:10:10::10", 128)
@@ -740,6 +772,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         const val ACTION_START = "net.atom.dpibypass.START"
         const val ACTION_STOP = "net.atom.dpibypass.STOP"
         const val PROXY_PORT = 1080
+        const val ROUTER_PORT = 1081
         private const val DEFAULT_DNS = "1.1.1.1"
         /** Motor yaşarken yerel dinleyicinin yoklanma aralığı (yalnız loopback). */
         private const val LISTENER_PROBE_INTERVAL_MS = 15_000L

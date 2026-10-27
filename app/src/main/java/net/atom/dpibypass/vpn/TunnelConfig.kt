@@ -2,6 +2,8 @@ package net.atom.dpibypass.vpn
 
 import net.atom.dpibypass.data.AppFilterMode
 import net.atom.dpibypass.data.Settings
+import net.atom.dpibypass.social.ExitMatcher
+import net.atom.dpibypass.social.ExitServer
 
 /**
  * TUN'u etkileyen ayarlar. Servis yalnızca bunlar değişince tüneli yeniden kurar;
@@ -15,6 +17,8 @@ data class TunnelConfig(
     val vodafoneMode: Boolean,
     val appFilterMode: AppFilterMode,
     val selectedApps: Set<String>,
+    /** Yurt dışı çıkış etkin ve geçerliyse sunucu + alan adları; değilse null. */
+    val exit: ExitConfig? = null,
 ) {
     companion object {
         fun from(settings: Settings) = TunnelConfig(
@@ -24,7 +28,23 @@ data class TunnelConfig(
             settings.vodafoneUnlimitedMode,
             settings.appFilterMode,
             settings.selectedApps,
+            ExitConfig.from(settings),
         )
+    }
+}
+
+/** Yurt dışı çıkışın tünele etkisi: sunucu ve yurt dışından çıkacak alan adları. */
+data class ExitConfig(val server: ExitServer, val platforms: Set<String>, val extraDomains: String) {
+    val matcher: ExitMatcher get() = ExitMatcher.of(platforms, extraDomains)
+
+    companion object {
+        /** Kapalıysa, sunucu geçersizse ya da hiçbir alan adı seçilmediyse null: tünel eskisi gibi çalışır. */
+        fun from(settings: Settings): ExitConfig? {
+            if (!settings.exitEnabled) return null
+            val server = ExitServer.parse(settings.exitServer) ?: return null
+            val config = ExitConfig(server, settings.exitPlatforms, settings.exitExtraDomains.trim())
+            return config.takeUnless { it.matcher.isEmpty }
+        }
     }
 }
 

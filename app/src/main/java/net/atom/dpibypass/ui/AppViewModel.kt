@@ -201,6 +201,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app), net.atom.dpibypass
     /** Kapsam dışındaki platform için tek adımlı düzeltme (kullanıcının açık komutu). */
     fun bringIntoScope(packages: Set<String>) = launch { repo.bringIntoScope(packages) }
     fun restoreScopeBackup() = launch { repo.restoreScopeBackup() }
+
+    // ---- yurt dışı çıkış (e-Devlet doğrulaması olmadan erişim) ----
+    val exitStatus = net.atom.dpibypass.social.ExitStatusBoard.status
+    val exitProbe = net.atom.dpibypass.social.ExitStatusBoard.probe
+    fun setExitEnabled(v: Boolean) = launch { repo.setExitEnabled(v) }
+    fun setExitServer(v: String) = launch { repo.setExitServer(v) }
+    fun setExitExtraDomains(v: String) = launch { repo.setExitExtraDomains(v) }
+    fun setExitPlatform(id: String, selected: Boolean) = launch {
+        repo.updateExitPlatforms { if (selected) it + id else it - id }
+    }
+
+    private val _exitChecking = MutableStateFlow(false)
+    val exitChecking: StateFlow<Boolean> = _exitChecking.asStateFlow()
+
+    /** Yazılan sunucuyu tünelden bağımsız olarak dener ve çıkış ülkesini ölçer. */
+    fun checkExitServer(raw: String) {
+        val server = net.atom.dpibypass.social.ExitServer.parse(raw) ?: return
+        if (_exitChecking.value) return
+        _exitChecking.value = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                net.atom.dpibypass.social.ExitProbe.check(server)
+            }
+            net.atom.dpibypass.social.ExitStatusBoard.probed(result)
+            _exitChecking.value = false
+        }
+    }
     fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = launch {
         repo.setSocialAccessMode(v)
         if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()
