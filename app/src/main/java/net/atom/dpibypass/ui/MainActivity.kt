@@ -48,12 +48,14 @@ import net.atom.dpibypass.ui.mode.ModeScreen
 import net.atom.dpibypass.ui.nav.BottomDock
 import net.atom.dpibypass.ui.nav.TabletRail
 import net.atom.dpibypass.ui.nav.Dest
+import net.atom.dpibypass.ui.nav.PrivacyHelperRoute
 import net.atom.dpibypass.ui.nav.SocialAdvancedRoute
 import net.atom.dpibypass.ui.nav.SocialDiagnosticsRoute
 import net.atom.dpibypass.ui.nav.SocialRoute
 import net.atom.dpibypass.ui.nav.showsDock
 import androidx.navigation.compose.currentBackStackEntryAsState
 import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
+import net.atom.dpibypass.ui.privacy.PrivacyHelperScreen
 import net.atom.dpibypass.ui.settings.SettingsScreen
 import net.atom.dpibypass.ui.social.SocialAdvancedScreen
 import net.atom.dpibypass.ui.social.SocialDiagnosticsScreen
@@ -263,6 +265,7 @@ private fun AppRoot(
                         viewModel,
                         onRequestTile = onRequestTile,
                         onOpenSocial = { navController.navigate(SocialRoute) { launchSingleTop = true } },
+                        onOpenPrivacy = { navController.navigate(PrivacyHelperRoute) { launchSingleTop = true } },
                         onOpenExit = {
                             navController.navigate(Dest.Social.route) {
                                 popUpTo(Dest.Home.route)
@@ -295,6 +298,9 @@ private fun AppRoot(
                         onOpenSettings = { openTab(Dest.Settings.route) },
                         onOpenApps = { openTab(Dest.Apps.route) },
                     )
+                }
+                composable(PrivacyHelperRoute) {
+                    PrivacyHelperScreen(onBack = { navController.popBackStack() })
                 }
                 composable(SocialDiagnosticsRoute) {
                     SocialDiagnosticsScreen(onBack = { navController.popBackStack() })

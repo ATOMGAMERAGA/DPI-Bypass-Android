@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.Vibration
@@ -46,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -87,7 +89,13 @@ import net.atom.dpibypass.util.NotificationUtils
 // ---------------------------------------------------------------------------
 
 @Composable
-fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}, onOpenSocial: () -> Unit = {}, onOpenExit: () -> Unit = {}) {
+fun SettingsScreen(
+    viewModel: AppViewModel,
+    onRequestTile: () -> Unit = {},
+    onOpenSocial: () -> Unit = {},
+    onOpenExit: () -> Unit = {},
+    onOpenPrivacy: () -> Unit = {},
+) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val activeDns by viewModel.activeDnsServers.collectAsStateWithLifecycle()
     val vodafoneActive by viewModel.vodafoneModeActive.collectAsStateWithLifecycle()
@@ -100,6 +108,26 @@ fun SettingsScreen(viewModel: AppViewModel, onRequestTile: () -> Unit = {}, onOp
     ) {
         // Sosyal Erişim kendi sayfasında: burada yalnızca durumu özetleyen tek satır.
         SocialAccessEntry(viewModel, onOpen = onOpenSocial, onOpenExit = onOpenExit)
+        // ---- Gizlilik ----
+        // Yerel, yalnızca okunur rehber: VPN/proxy ve ağ isteği yok, hiçbir şey kaydedilmez.
+        SectionHeader("Gizlilik")
+        AppCard(modifier = Modifier.fillMaxWidth()) {
+            ListRow(
+                title = "Gizlilik Yardımcısı",
+                subtitle = "Sosyal medya yaş doğrulamasında hangi verinin kime gittiğini, resmî itiraz " +
+                    "yollarını ve gizlilik ayarı adımlarını gösterir. VPN veya proxy gerektirmez.",
+                icon = Icons.Rounded.PrivacyTip,
+                onClick = onOpenPrivacy,
+                modifier = Modifier.testTag("settings-privacy-helper"),
+                trailing = {
+                    Icon(
+                        Icons.Rounded.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+            )
+        }
         // ---- Hızlı erişim ----
         SectionHeader("Hızlı erişim")
         AppCard(modifier = Modifier.fillMaxWidth()) {

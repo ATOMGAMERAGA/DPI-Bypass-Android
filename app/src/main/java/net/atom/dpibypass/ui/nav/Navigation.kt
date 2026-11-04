@@ -74,10 +74,14 @@ const val SocialRoute = "social"
 const val SocialAdvancedRoute = "social/advanced"
 const val SocialDiagnosticsRoute = "social/diagnostics"
 
+/** Ayarlar'ın alt sayfası: Gizlilik Yardımcısı (gezinmede Ayarlar seçili kalır). */
+const val PrivacyHelperRoute = "settings/privacy"
+
 /** Bir rotanın dock/raydaki sekmesi; alt sayfalar ait oldukları sekmeyi gösterir. */
 fun tabRouteFor(route: String?): String = when (route) {
     null -> Dest.Home.route
     SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute -> Dest.Social.route
+    PrivacyHelperRoute -> Dest.Settings.route
     else -> route
 }
 
