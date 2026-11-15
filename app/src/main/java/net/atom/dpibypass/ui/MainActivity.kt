@@ -87,6 +87,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         maybeRequestNotificationPermission()
 
+        // Paket sorgusu kompozisyonun dışında bir kez yapılır; eskiden her ayar
+        // değişikliğindeki yeniden kompozisyonda PackageManager'a gidiliyordu.
+        val discordInstalled = isDiscordInstalled()
         setContent {
             val settings by viewModel.settings.collectAsStateWithLifecycle()
             DpiBypassTheme(themePref = settings.theme) {
@@ -98,7 +101,7 @@ class MainActivity : ComponentActivity() {
                         onConnect = ::connect,
                         onDisconnect = ::disconnect,
                         onRequestTile = ::requestQuickTile,
-                        discordInstalled = isDiscordInstalled(),
+                        discordInstalled = discordInstalled,
                     )
                 }
             }

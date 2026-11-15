@@ -52,11 +52,7 @@ enum class Transport {
  */
 class IspDetector(private val context: Context) {
 
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
-        .callTimeout(5, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient get() = sharedClient
 
     /** O an internete çıkılan taşıyıcı. VPN aktifse alttaki gerçek ağa bakar. */
     fun activeTransport(): Transport {
@@ -148,6 +144,14 @@ class IspDetector(private val context: Context) {
 
     companion object {
         private const val TAG = "IspDetector"
+
+        private val sharedClient: OkHttpClient by lazy {
+            net.atom.dpibypass.util.Http.base.newBuilder()
+                .connectTimeout(3, TimeUnit.SECONDS)
+                .readTimeout(3, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build()
+        }
 
         /**
          * Ağ profillerinin anahtarı: taşıyıcı + ISS. SSID kullanılmaz — okumak

@@ -1,6 +1,10 @@
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <netdb.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 
 #include <jni.h>
 #include <android/log.h>
@@ -67,6 +71,35 @@ static void tune_max_open(rlim_t nofile) {
     params.max_open = (int) fit;
 }
 
+/*
+ * Durdurma tanıtıcısı: dinleme soketinin dup() kopyası.
+ *
+ * Olay döngüsü biterken dinleme soketini kendisi kapatır (destroy_pool). Java
+ * tarafı o numarayla shutdown() çağırırsa ve numara arada başka bir sokete
+ * (ör. tünelin bir bağlantısına) verilmişse YANLIŞ soket kapatılırdı. Kopya
+ * bize aittir ve yalnızca döngü bittikten sonra kapatılır; böylece shutdown
+ * her zaman doğru sokete gider ve numara yeniden kullanılamaz.
+ */
+static pthread_mutex_t stop_lock = PTHREAD_MUTEX_INITIALIZER;
+static int stop_fd = -1;
+
+/*
+ * parse_args bazı argümanları (ör. -P) kopyalamadan saklar; bu yüzden argv
+ * dizgeleri motor çalıştığı sürece yaşamalıdır. Bir sonraki kurulumda serbest
+ * bırakılır — eskiden hiç bırakılmıyordu ve her strateji denemesi bellek
+ * sızdırıyordu.
+ */
+static char **saved_argv = NULL;
+static int saved_argc = 0;
+
+static void free_saved_argv(void) {
+    if (!saved_argv) return;
+    for (int i = 0; i < saved_argc; i++) free(saved_argv[i]);
+    free(saved_argv);
+    saved_argv = NULL;
+    saved_argc = 0;
+}
+
 JNIEXPORT jint JNI_OnLoad(
         __attribute__((unused)) JavaVM *vm,
         __attribute__((unused)) void *reserved) {
@@ -81,17 +114,34 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniCreateSocketWithCommandLine(
         __attribute__((unused)) jobject thiz,
         jobjectArray args) {
     int argc = (*env)->GetArrayLength(env, args);
-    char *argv[argc];
+    char **argv = calloc((size_t) argc + 1, sizeof(char *));
+    if (!argv) {
+        return -1;
+    }
     for (int i = 0; i < argc; i++) {
         jstring arg = (jstring) (*env)->GetObjectArrayElement(env, args, i);
-        const char *arg_str = (*env)->GetStringUTFChars(env, arg, 0);
-        argv[i] = strdup(arg_str);
-        (*env)->ReleaseStringUTFChars(env, arg, arg_str);
+        const char *arg_str = arg ? (*env)->GetStringUTFChars(env, arg, 0) : NULL;
+        argv[i] = strdup(arg_str ? arg_str : "");
+        if (arg_str) (*env)->ReleaseStringUTFChars(env, arg, arg_str);
+        if (arg) (*env)->DeleteLocalRef(env, arg);
+        if (!argv[i]) {
+            for (int j = 0; j < i; j++) free(argv[j]);
+            free(argv);
+            return -1;
+        }
     }
+
+    pthread_mutex_lock(&stop_lock);
+    // Önceki motor tamamen bitti (Java tarafı döngünün dönmesini bekler);
+    // onun argümanları artık kullanılmıyor.
+    free_saved_argv();
+    saved_argv = argv;
+    saved_argc = argc;
 
     int res = parse_args(argc, argv);
     if (res < 0) {
         uniperror("parse_args");
+        pthread_mutex_unlock(&stop_lock);
         return -1;
     }
     tune_max_open(raise_nofile_limit());
@@ -102,8 +152,14 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniCreateSocketWithCommandLine(
         uniperror("listen_socket");
         // Yarım kalan argümanlar bir sonraki denemeye taşınmasın.
         reset_params();
+        pthread_mutex_unlock(&stop_lock);
         return -1;
     }
+    if (stop_fd >= 0) {
+        close(stop_fd);
+    }
+    stop_fd = dup(fd);
+    pthread_mutex_unlock(&stop_lock);
     LOG(LOG_S, "listen_socket, fd: %d", fd);
 
     return fd;
@@ -317,11 +373,24 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniStartProxy(
         jint fd) {
     LOG(LOG_S, "start_proxy, fd: %d", fd);
     NOT_EXIT = 1;
-    if (event_loop(fd) < 0) {
+    int res = event_loop(fd);
+    int err = res < 0 ? get_e() : 0;
+    if (res < 0) {
         uniperror("event_loop");
-        return get_e();
     }
-    return 0;
+    // Parametreler YALNIZCA döngü bittikten sonra, döngünün kendi iş
+    // parçacığında sıfırlanır. Eskiden durdurma çağrısı (başka bir iş
+    // parçacığından) döngü hâlâ bağlantı işlerken desync parametrelerini ve
+    // bellek havuzunu serbest bırakıyordu: bağlantı kesme ya da strateji
+    // değiştirme anında süreç çökebiliyordu (use-after-free).
+    pthread_mutex_lock(&stop_lock);
+    if (stop_fd >= 0) {
+        close(stop_fd);
+        stop_fd = -1;
+    }
+    reset_params();
+    pthread_mutex_unlock(&stop_lock);
+    return res < 0 ? (err > 0 ? -err : -1) : 0;
 }
 
 JNIEXPORT jint JNICALL
@@ -331,15 +400,22 @@ Java_net_atom_dpibypass_engine_ByeDpiProxy_jniStopProxy(
         jint fd) {
     LOG(LOG_S, "stop_proxy, fd: %d", fd);
 
-    // fd < 0: olay döngüsü kendiliğinden bitti ve dinleme soketini zaten
-    // kapattı. O numara artık başka bir sokete (ör. tünelin) ait olabilir;
-    // shutdown edilmez, yalnızca parametreler sıfırlanır.
-    int res = fd >= 0 ? shutdown(fd, SHUT_RDWR) : 0;
-    reset_params();
+    // Yalnızca dinleme soketi kapatılır: olay döngüsü POLLHUP ile uyanır,
+    // kendi kaynaklarını bırakır ve parametreleri sıfırlar (bkz. jniStartProxy).
+    // Döngü zaten bittiyse kopya kapatılmıştır; yapılacak bir şey yoktur.
+    int res = 0;
+    pthread_mutex_lock(&stop_lock);
+    if (stop_fd >= 0) {
+        res = shutdown(stop_fd, SHUT_RDWR);
+    }
+    pthread_mutex_unlock(&stop_lock);
 
     if (res < 0) {
         uniperror("shutdown");
-        return get_e();
+        // ENOTCONN: soket zaten kapanma sürecinde; durdurma amacına ulaşıldı.
+        if (get_e() != ENOTCONN) {
+            return get_e();
+        }
     }
     return 0;
 }

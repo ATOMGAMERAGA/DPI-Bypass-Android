@@ -2,6 +2,7 @@ package net.atom.dpibypass.vpn
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -9,8 +10,11 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -75,7 +79,17 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     private var exitRouter: ExitRouter? = null
     private var exitProbeJob: Job? = null
     private val mutex = Mutex()
-    private var stopping = false
+    // Başlat/durdur komutlarını SIRAYA koyar. Eskiden iki "Bağlan" (ör. Hızlı
+    // Panel + bildirim) aynı anda çalışıp birbirinin motorunu kapatıyor, bağlanma
+    // sürerken gelen "Kes" ise yarıda kalan kurulumdan sonra tüneli açık
+    // bırakabiliyordu.
+    private val lifecycleMutex = Mutex()
+    private var startJob: Job? = null
+    /** Son alınan komutun kimliği; durdurma yalnızca kendisinden yeni komut yoksa servisi kapatır. */
+    @Volatile private var lastStartId = 0
+    private var inForeground = false
+    private var tunStartedAt = 0L
+    @Volatile private var stopping = false
 
     private var currentArgs: Array<String> = emptyArray()
     private var currentBaseArgs: Array<String> = emptyArray()
@@ -114,15 +128,41 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        lastStartId = startId
         when (intent?.action) {
-            ACTION_START -> lifecycleScope.launch { start() }
-            ACTION_STOP -> lifecycleScope.launch { stop() }
-            else -> Log.w(TAG, "Bilinmeyen action: ${intent?.action}")
+            // SERVICE_INTERFACE: sistem "Her zaman açık VPN" için servisi kendisi başlatır.
+            ACTION_START, VpnService.SERVICE_INTERFACE -> requestStart()
+            ACTION_STOP -> requestStop(startId)
+            // START_STICKY: süreç bağlıyken öldü, sistem servisi yeniden kurdu.
+            // İzin hâlâ varsa bağlantı geri getirilir; yoksa servis kapanır.
+            null -> if (VpnService.prepare(this) == null) requestStart() else requestStop(startId)
+            else -> {
+                Log.w(TAG, "Bilinmeyen action: ${intent.action}")
+                if (VpnState.state.value == ConnectionState.Disconnected) requestStop(startId)
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        // Servis, durdurma yolundan geçmeden yok edildiyse (ör. sistem) native
+        // motor ve tünel açık kalmasın. lifecycleScope artık iptal edildiği için
+        // temizlik ayrı bir kapsamda, ana iş parçacığını bekletmeden yapılır.
+        if (tunFd != null || proxyJob != null) {
+            stopping = true
+            watchdogJob?.cancel(); settingsJob?.cancel()
+            val proxy = byeDpiProxy
+            val fd = tunFd
+            val router = exitRouter
+            tunFd = null; exitRouter = null; proxyJob = null
+            CoroutineScope(Dispatchers.IO + NonCancellable).launch {
+                runCatching { TProxyService.TProxyStopService() }
+                runCatching { fd?.close() }
+                runCatching { router?.close() }
+                runCatching { proxy.stopProxy() }
+                VpnState.update(ConnectionState.Disconnected, null)
+            }
+        }
         engineToken?.let { EngineOwnership.release(it) }
         engineToken = null
         super.onDestroy()
@@ -130,13 +170,41 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
     override fun onRevoke() {
         Log.i(TAG, "VPN izni geri alındı")
-        lifecycleScope.launch { stop() }
+        requestStop(lastStartId)
     }
 
     // ---- yaşam döngüsü ----
 
+    private fun requestStart() {
+        if (startJob?.isActive == true) {
+            Log.i(TAG, "Bağlanma zaten sürüyor")
+            return
+        }
+        startJob = lifecycleScope.launch { lifecycleMutex.withLock { start() } }
+    }
+
+    private fun requestStop(stopId: Int) {
+        // startForegroundService ile gelindiyse servis kısa süre içinde ön plana
+        // geçmek ZORUNDADIR; geçmeden durursa Android uygulamayı çökertir
+        // ("did not then call Service.startForeground"). Servis zaten çalışmıyor
+        // olsa bile (ör. bildirimden/kısayoldan "Kes") bu sözleşme yerine getirilir.
+        ensureForeground()
+        val pending = startJob
+        lifecycleScope.launch {
+            // Süren bir bağlanma önce iptal edilir; yarım kurulum stop ile temizlenir.
+            pending?.cancelAndJoin()
+            lifecycleMutex.withLock { stop(stopId = stopId) }
+        }
+    }
+
+    private fun ensureForeground() {
+        if (inForeground) return
+        runCatching { goForeground(getString(R.string.status_disconnected), connected = false) }
+            .onFailure { Log.w(TAG, "Ön plana geçilemedi: ${it.message}") }
+    }
+
     private suspend fun start() {
-        if (VpnState.state.value == ConnectionState.Connected) {
+        if (VpnState.state.value == ConnectionState.Connected && tunFd != null) {
             Log.w(TAG, "Zaten bağlı")
             return
         }
@@ -187,6 +255,9 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             startWatchdog()
             startSettingsWatcher()
             Log.i(TAG, "Bağlandı: ${currentProfile?.shortLabel()} · DNS=${dnsPlan?.servers}")
+        } catch (e: CancellationException) {
+            // Kullanıcı bağlanma sürerken "Kes" dedi; temizliği requestStop yapar.
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Başlatma başarısız", e)
             VpnState.update(ConnectionState.Failed, null)
@@ -199,7 +270,8 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         }
     }
 
-    private suspend fun stop(keepFailure: Boolean = false) {
+    /** Çağıran [lifecycleMutex]'i tutmalıdır (bkz. [requestStop], [stopFromWatcher]). */
+    private suspend fun stop(keepFailure: Boolean = false, stopId: Int = lastStartId) {
         Log.i(TAG, "Durduruluyor")
         SocialAccessRuntime.vpnStopped()
         watchdogJob?.cancel()
@@ -223,8 +295,21 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         alphaOperation = null; alphaPreviousArgs = null; alphaInstalledArgs = null; alphaStrategyId = null
         engineToken?.let { EngineOwnership.release(it) }
         engineToken = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        // Durdurma kuyruğa girdikten sonra yeni bir "Bağlan" geldiyse servis
+        // kapatılmaz; o komut sıradaki iş olarak çalışacak.
+        if (stopId == lastStartId) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            inForeground = false
+            stopSelf(stopId)
+        }
+    }
+
+    /** Ayar izleyicisi gibi iç işlerden kapatma: komut sırasına girer. */
+    private fun stopFromWatcher(keepFailure: Boolean) {
+        lifecycleScope.launch {
+            startJob?.cancelAndJoin()
+            lifecycleMutex.withLock { stop(keepFailure = keepFailure) }
+        }
     }
 
     // ---- DNS ----
@@ -294,7 +379,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             Log.w(TAG, "Yalnızca seçili kipinde uygulama kalmadı; tünel kapatılıyor")
             VpnState.update(ConnectionState.Failed, null)
             VpnState.updateFailure("\"Yalnızca seçili\" listesinde kurulu uygulama kalmadı; bütün trafiği tünele almamak için bağlantı kapatıldı.")
-            lifecycleScope.launch { stop(keepFailure = true) }
+            stopFromWatcher(keepFailure = true)
             return
         }
         applyDnsPlan(settings)
@@ -330,7 +415,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             VpnState.update(ConnectionState.Failed, null)
             // stop() bu izleyici işi iptal eder; kendi içinden çağrılırsa
             // temizlik yarıda kalırdı. Ayrı bir coroutine'de çalıştırılır.
-            lifecycleScope.launch { stop() }
+            stopFromWatcher(keepFailure = false)
         }
     }
 
@@ -469,7 +554,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
     // ---- hev-socks5-tunnel ----
 
-    private fun startTun2Socks(settings: Settings) {
+    private suspend fun startTun2Socks(settings: Settings) {
         if (tunFd != null) throw IllegalStateException("TUN zaten açık")
 
         val udpLine = if (settings.disableQuic) "" else "\n  udp: 'udp'"
@@ -493,8 +578,13 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             |  port: $socksPort$udpLine
         """.trimMargin()
 
-        val configFile = File.createTempFile("tun2socks", ".yml", cacheDir).apply {
-            writeText(config)
+        // Sabit dosya adı: eskiden her bağlanma/yeniden kurulum önbellekte yeni bir
+        // geçici dosya bırakıyordu ve hiç silinmiyordu. Dosya diske ana iş
+        // parçacığı dışında yazılır.
+        val configFile = withContext(Dispatchers.IO) {
+            cacheDir.listFiles { f -> f.name.startsWith("tun2socks") && f.name != CONFIG_FILE }
+                ?.forEach { runCatching { it.delete() } }
+            File(cacheDir, CONFIG_FILE).apply { writeText(config) }
         }
 
         val applied = mutableListOf<String>()
@@ -502,24 +592,41 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             ?: throw IllegalStateException("VPN establish() null döndü")
         tunFd = fd
         TProxyService.TProxyStartService(configFile.absolutePath, fd.fd)
+        tunStartedAt = SystemClock.elapsedRealtime()
         exit?.let { probeExit(it) }
         // Arayüze ancak TUN gerçekten kurulduktan sonra "etkin" denir; niyet ile
         // sonucu ayırmak, "seçtim ama olmadı" durumunun görünmesini sağlar.
         VpnState.updateDns(applied, dnsPlan?.label.orEmpty())
     }
 
-    private fun stopTun2Socks() {
-        try {
-            TProxyService.TProxyStopService()
-        } catch (e: Exception) {
-            Log.w(TAG, "TProxyStopService: ${e.message}")
-        }
-        tunFd?.close()
-        tunFd = null
+    /**
+     * Tüneli kapatır. Native durdurma, tünel iş parçacığının bitmesini
+     * (`pthread_join`) bekler; eskiden ANA iş parçacığında çağrılıyordu ve
+     * bağlantı keserken / ayar değiştirirken arayüz donabiliyordu.
+     */
+    private suspend fun stopTun2Socks() {
         exitProbeJob?.cancel()
         exitProbeJob = null
-        exitRouter?.close()
+        val router = exitRouter
         exitRouter = null
+        val fd = tunFd
+        tunFd = null
+        if (fd != null) {
+            // hev, durdurma sinyalini ancak kendi olay kanalı kurulduktan sonra
+            // alabilir; çok erken gelen sinyal kaybolur ve `pthread_join` sonsuza
+            // dek bekler. Kurulumun bitmesi için kısa bir süre tanınır.
+            val sinceStart = SystemClock.elapsedRealtime() - tunStartedAt
+            if (sinceStart in 0 until TUN_MIN_UPTIME_MS) delay(TUN_MIN_UPTIME_MS - sinceStart)
+        }
+        withContext(Dispatchers.IO + NonCancellable) {
+            try {
+                TProxyService.TProxyStopService()
+            } catch (e: Exception) {
+                Log.w(TAG, "TProxyStopService: ${e.message}")
+            }
+            runCatching { fd?.close() }
+            router?.close()
+        }
     }
 
     /**
@@ -765,6 +872,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         } else {
             startForeground(NotificationUtils.NOTIFICATION_ID, notification)
         }
+        inForeground = true
     }
 
     companion object {
@@ -789,6 +897,11 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
 
         /** TUN kapanışı ile yeniden açılışı arasındaki emniyet payı. */
         private const val TUN_RESTART_GAP_MS = 150L
+
+        /** Tünel açıldıktan sonra durdurma sinyalinin güvenle alınabileceği en kısa süre. */
+        private const val TUN_MIN_UPTIME_MS = 300L
+
+        private const val CONFIG_FILE = "tun2socks.yml"
 
         /**
          * Strateji yarışının üst sınırı. Dolduğunda o ana kadarki EN İYİSİ ile

@@ -14,9 +14,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -35,6 +37,7 @@ import net.atom.dpibypass.ui.theme.LocalIsDarkTheme
 import net.atom.dpibypass.ui.theme.Motion
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -64,6 +67,9 @@ internal data class AuroraBlob(
 )
 
 private const val TWO_PI = (2.0 * PI).toFloat()
+
+/** Aurora döngüsündeki çizim adımı sayısı (~15 adım/sn). */
+private const val AURORA_STEPS = Motion.AURORA_CYCLE_MS / 66f
 
 private fun DrawScope.paintAurora(
     blobs: List<AuroraBlob>,
@@ -175,7 +181,8 @@ fun AmbientBackground(
     // Aurora katmanını ekrandaki HER kart, kutucuk ve metin alanı örnekler; bu
     // yüzden dokuya alınır. Kabuk katmanını yalnızca dock ve sihirbaz örnekler,
     // ona ayrıca tam ekran tampon ayırmaya değmez.
-    val ambient = rememberBackdrop(offscreen = true)
+    // Yalnızca aurora çizimini içerir (çocuk yok): sürüm sayacı içeriği tam izler.
+    val ambient = rememberBackdrop(offscreen = true, selfContained = true)
     val shell = rememberBackdrop()
 
     val transition = rememberInfiniteTransition(label = "ambient")
@@ -185,6 +192,13 @@ fun AmbientBackground(
         animationSpec = infiniteRepeatable(tween(Motion.AURORA_CYCLE_MS, easing = LinearEasing)),
         label = "ambientProgress",
     )
+    // Aurora 26 saniyelik bir döngüde piksel altı hızla akar; her karede (60-120
+    // Hz) yeniden çizmek gözle ayırt edilemez ama ekrandaki her cam yüzeyin
+    // bulanıklığını da her karede yeniden hesaplatır. Saniyede ~15 adım aynı
+    // görüntüyü verir; aradaki karelerde zemin ve camlar yeniden çizilmez.
+    val steppedProgress = remember(progressState) {
+        derivedStateOf { floor(progressState.value * AURORA_STEPS) / AURORA_STEPS }
+    }
     // Durum rengi geçişi: renk animasyonu ASLA taşımaz (effects yayı).
     val accentState = animateColorAsState(
         targetValue = accent,
@@ -208,6 +222,9 @@ fun AmbientBackground(
                 Box(
                     Modifier
                         .fillMaxSize()
+                        // Kendi katmanı: üstteki kabuk yeniden çizilince aurora
+                        // gereksiz yere yeniden kaydedilmesin.
+                        .graphicsLayer()
                         .backdropSource(ambient)
                         .drawBehind {
                             paintAurora(
@@ -215,7 +232,7 @@ fun AmbientBackground(
                                 baseTop = baseTop,
                                 baseBottom = baseBottom,
                                 dark = dark,
-                                progress = progressState.value,
+                                progress = steppedProgress.value,
                                 accent = accentState.value,
                             )
                         },

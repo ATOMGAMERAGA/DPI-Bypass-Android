@@ -86,8 +86,20 @@ import kotlin.math.ceil
  * aksi hâlde her karede yeniden kompozisyon tetiklenirdi.
  */
 @Stable
-class BackdropState internal constructor(internal val layer: GraphicsLayer) {
+class BackdropState internal constructor(
+    internal val layer: GraphicsLayer,
+    /**
+     * Kayıt yalnızca kaynağın KENDİ çizimini içeriyorsa (alt katmanı olan çocuk
+     * yok) true. O zaman içerik ancak kaynak yeniden çizilince değişir ve
+     * [version] bunu güvenilir biçimde izler; cam yüzeyler değişmeyen karede
+     * bulanıklığı yeniden hesaplatmaz (bkz. [glass]).
+     */
+    internal val selfContained: Boolean = false,
+) {
     internal var origin: Offset = Offset.Zero
+
+    /** Kaynak her yeniden kaydedildiğinde artar. Bilerek `State` değildir. */
+    internal var version: Long = 0L
     internal val hasContent: Boolean
         get() = layer.size.width > 0 && layer.size.height > 0
 }
@@ -102,11 +114,11 @@ class BackdropState internal constructor(internal val layer: GraphicsLayer) {
  * gerçekten çok örneklenen katman için açılır.
  */
 @Composable
-fun rememberBackdrop(offscreen: Boolean = false): BackdropState {
+fun rememberBackdrop(offscreen: Boolean = false, selfContained: Boolean = false): BackdropState {
     val layer = rememberGraphicsLayer()
-    return remember(layer, offscreen) {
+    return remember(layer, offscreen, selfContained) {
         if (offscreen) layer.compositingStrategy = CompositingStrategy.Offscreen
-        BackdropState(layer)
+        BackdropState(layer, selfContained)
     }
 }
 
@@ -141,6 +153,7 @@ fun Modifier.backdropSource(state: BackdropState?): Modifier {
             // `record` DrawScope üzerinde GraphicsLayer'a tanımlı bir üye
             // uzantıdır: alıcı katmanın kendisidir.
             state.layer.record { this@drawWithContent.drawContent() }
+            state.version++
             drawLayer(state.layer)
         }
 }
@@ -303,6 +316,7 @@ fun Modifier.glass(
     }
     val strokePx = with(density) { borderWidth.toPx() }
     val position = remember { PositionHolder() }
+    val recorded = remember { RecordCache() }
 
     return this
         .clip(shape)
@@ -339,7 +353,13 @@ fun Modifier.glass(
                     // Çizerken aynı pay geri ötelenir, taşan kısmı da dıştaki
                     // clip(shape) kırpar.
                     val pad = padPx.toFloat()
-                    blurLayer.record(
+                    // Kayıt yalnızca girdileri değişince yenilenir. Her karede yeniden
+                    // kaydetmek, arkadaki aurora DEĞİŞMESE bile ekrandaki her cam
+                    // yüzeyin bulanıklığını GPU'da baştan hesaplatıyordu — boşta
+                    // duran ekranda bile sürekli ısınma ve kasma demekti. Aynı
+                    // girdilerle kayıt birebir aynı çizimi üretir.
+                    val reusable = (base == null || base.selfContained) && (over == null || over.selfContained)
+                    if (!reusable || recorded.changed(visible, position.value, base, over, baseFill, padPx)) blurLayer.record(
                         size = IntSize(
                             ceil(visible.width).toInt() + padPx * 2,
                             ceil(visible.height).toInt() + padPx * 2,
@@ -410,6 +430,51 @@ private fun visibleSlice(
 /** Çizim sırasında okunan konum — `State` değil, çünkü kompozisyonu tetiklememeli. */
 internal class PositionHolder {
     var value: Offset = Offset.Zero
+}
+
+/**
+ * Bulanıklık katmanının son kaydının girdileri. [changed] girdiler farklıysa
+ * yenilerini saklar ve true döner. Ayırma (allocation) yapmaz: her karede çağrılır.
+ */
+internal class RecordCache {
+    private var valid = false
+    private var left = 0f
+    private var top = 0f
+    private var right = 0f
+    private var bottom = 0f
+    private var posX = 0f
+    private var posY = 0f
+    private var base: BackdropState? = null
+    private var baseVersion = 0L
+    private var baseOriginX = 0f
+    private var baseOriginY = 0f
+    private var over: BackdropState? = null
+    private var overVersion = 0L
+    private var overOriginX = 0f
+    private var overOriginY = 0f
+    private var fill: Color = Color.Unspecified
+    private var pad = 0
+
+    fun changed(visible: Rect, position: Offset, b: BackdropState?, o: BackdropState?, baseFill: Color, padPx: Int): Boolean {
+        val same = valid &&
+            left == visible.left && top == visible.top && right == visible.right && bottom == visible.bottom &&
+            posX == position.x && posY == position.y &&
+            base === b && baseVersion == (b?.version ?: 0L) &&
+            baseOriginX == (b?.origin?.x ?: 0f) && baseOriginY == (b?.origin?.y ?: 0f) &&
+            over === o && overVersion == (o?.version ?: 0L) &&
+            overOriginX == (o?.origin?.x ?: 0f) && overOriginY == (o?.origin?.y ?: 0f) &&
+            fill == baseFill && pad == padPx
+        if (same) return false
+        valid = true
+        left = visible.left; top = visible.top; right = visible.right; bottom = visible.bottom
+        posX = position.x; posY = position.y
+        base = b; baseVersion = b?.version ?: 0L
+        baseOriginX = b?.origin?.x ?: 0f; baseOriginY = b?.origin?.y ?: 0f
+        over = o; overVersion = o?.version ?: 0L
+        overOriginX = o?.origin?.x ?: 0f; overOriginY = o?.origin?.y ?: 0f
+        fill = baseFill; pad = padPx
+        return true
+    }
 }
 
 /**

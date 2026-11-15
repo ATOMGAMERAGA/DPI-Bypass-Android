@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -234,11 +235,16 @@ class StrategyTester(
             Log.d(TAG, "${strategy.id} test hatası: ${e.message}")
             StrategyTestResult(strategy, StrategyTestResult.State.Failed)
         } finally {
-            try {
-                proxy.stopProxy()
-            } catch (_: Exception) {
+            // İptal edilse bile motorun gerçekten durmasını BEKLE: native durum
+            // tekildir; eski döngü bitmeden kurulan yeni motor (ör. kullanıcı test
+            // sürerken "Bağlan"a bastı) aynı parametreleri ezer.
+            withContext(NonCancellable) {
+                try {
+                    proxy.stopProxy()
+                } catch (_: Exception) {
+                }
+                job?.join()
             }
-            job?.join()
         }
     }
 
