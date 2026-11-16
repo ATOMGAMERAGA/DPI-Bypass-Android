@@ -24,13 +24,17 @@ class ByeDpiProxy {
 
     private val mutex = Mutex()
     private var fd = -1
-    // Olay döngüsü kendiliğinden bitti (ör. tanıtıcı sınırı); dinleme soketi
-    // native tarafta zaten kapandı.
-    private var loopEnded = false
+    // Bu nesne tek kullanımlıktır. Durdurma, kurulumdan ÖNCE gelirse (ör. strateji
+    // testi dinleyiciyi beklerken zaman aşımına uğradı) kurulum hiç yapılmaz;
+    // eskiden durdurma "çalışmıyor" diye reddediliyor, sonra kurulan döngü
+    // kimse durdurmadığı için sonsuza dek bekliyordu (test ekranı donuyordu).
+    private var stopRequested = false
 
     /**
      * Verilen ByeDPI argümanlarıyla dinleme soketini kurar ve olay döngüsünü
      * başlatır. Bu çağrı proxy durana kadar bloke eder (IO dispatcher'da çağır).
+     * Döndüğünde native parametreler sıfırlanmıştır; aynı süreçte yeni bir motor
+     * güvenle kurulabilir.
      *
      * @param args "ciadpi" + argümanlar (ör. ["ciadpi", "-p", "1080", "--split", "1"])
      * @return 0 başarı; <0 hata kodu
@@ -41,26 +45,26 @@ class ByeDpiProxy {
             return -1
         }
         val code = jniStartProxy(socketFd)
-        // stopProxy ile durdurulduysa fd çoktan sıfırlanmıştır; değilse döngü
-        // kendi kendine bitmiştir ve o fd numarası artık bize ait değildir.
-        mutex.withLock { if (fd == socketFd) loopEnded = true }
+        // Döngü dinleme soketini kendisi kapattı; numara artık bize ait değil.
+        mutex.withLock { fd = -1 }
         return code
     }
 
-    /** Çalışan proxy'yi durdurur (dinleme soketini kapatır, native paramları sıfırlar). */
+    /**
+     * Çalışan proxy'yi durdurur: dinleme soketi kapatılır, olay döngüsü kendi
+     * iş parçacığında biter ve parametreleri orada sıfırlar. Çalışmıyorsa (henüz
+     * kurulmadı ya da çoktan bitti) bir şey yapmaz. Döngünün bitişini beklemek
+     * çağıranın işidir ([startProxy]'yi çalıştıran işi `join` ederek).
+     */
     suspend fun stopProxy(): Int = mutex.withLock {
-        if (fd < 0) {
-            throw IllegalStateException("Proxy çalışmıyor")
-        }
-        val result = jniStopProxy(if (loopEnded) -1 else fd)
-        if (result == 0) {
-            fd = -1
-            loopEnded = false
-        }
-        result
+        stopRequested = true
+        if (fd < 0) 0 else jniStopProxy(fd)
     }
 
     private suspend fun createSocket(args: Array<String>): Int = mutex.withLock {
+        if (stopRequested) {
+            return@withLock -1
+        }
         if (fd >= 0) {
             throw IllegalStateException("Proxy zaten çalışıyor")
         }

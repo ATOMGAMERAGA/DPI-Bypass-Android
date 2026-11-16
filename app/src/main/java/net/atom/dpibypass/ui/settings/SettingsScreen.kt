@@ -50,6 +50,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import net.atom.dpibypass.BuildConfig
 import net.atom.dpibypass.R
 import net.atom.dpibypass.data.ThemePref
@@ -557,8 +559,10 @@ private fun rememberUsage(): AppUsage.Snapshot {
     var snapshot by remember { mutableStateOf(AppUsage.snapshot(context)) }
     LaunchedEffect(context) {
         while (true) {
-            snapshot = AppUsage.snapshot(context)
             delay(2000)
+            // Pil/trafik/güç sorguları sistem servislerine bağlayıcı çağrısıdır;
+            // ana iş parçacığında iki saniyede bir yapılınca kaydırma takılıyordu.
+            snapshot = withContext(Dispatchers.IO) { AppUsage.snapshot(context) }
         }
     }
     return snapshot

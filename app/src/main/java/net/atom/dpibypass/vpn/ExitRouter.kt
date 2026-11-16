@@ -16,8 +16,10 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -49,6 +51,21 @@ class ExitRouter(
     private val pool: ExecutorService = Executors.newCachedThreadPool { r -> Thread(r, "exit-router").apply { isDaemon = true } }
     private var serverSocket: ServerSocket? = null
     @Volatile private var closed = false
+    // Açık soketler. Engelleyen soket G/Ç'si iş parçacığı kesmesiyle (shutdownNow)
+    // durmaz; yönlendirici kapatılırken soketler kapatılmazsa her bağlantının iki
+    // iş parçacığı ve tanıtıcıları, karşı taraf kapatana kadar (bazen saatlerce)
+    // yaşardı — her ayar değişikliği ve yeniden bağlanma sızıntıyı büyütüyordu.
+    private val openSockets: MutableSet<Closeable> = ConcurrentHashMap.newKeySet()
+
+    private fun <T : Closeable> track(c: T): T {
+        openSockets.add(c)
+        if (closed) runCatching { c.close() }
+        return c
+    }
+
+    private fun untrack(c: Closeable) {
+        openSockets.remove(c)
+    }
 
     fun start() {
         val ss = ServerSocket()
@@ -59,7 +76,14 @@ class ExitRouter(
         pool.execute {
             while (!closed) {
                 val client = try { ss.accept() } catch (e: IOException) { break }
-                pool.execute { handle(client) }
+                track(client)
+                try {
+                    pool.execute { handle(client) }
+                } catch (e: RejectedExecutionException) {
+                    untrack(client)
+                    runCatching { client.close() }
+                    break
+                }
             }
         }
     }
@@ -67,11 +91,21 @@ class ExitRouter(
     override fun close() {
         closed = true
         runCatching { serverSocket?.close() }
+        openSockets.toList().forEach { runCatching { it.close() } }
+        openSockets.clear()
         pool.shutdownNow()
         ExitStatusBoard.stopped()
     }
 
     private fun handle(client: Socket) {
+        try {
+            handleTracked(client)
+        } finally {
+            untrack(client)
+        }
+    }
+
+    private fun handleTracked(client: Socket) {
         try {
             client.tcpNoDelay = true
             client.soTimeout = HANDSHAKE_TIMEOUT_MS
@@ -192,13 +226,18 @@ class ExitRouter(
 
     /** İki yönlü aktarım; bir yön bitince karşı tarafın yazma yönü kapatılır (yarım kapanış). */
     private fun pipe(a: Socket, b: Socket) {
-        a.soTimeout = 0; b.soTimeout = 0
-        val other = pool.submit { copy(b.getInputStream(), a.getOutputStream()); runCatching { a.shutdownOutput() } }
-        copy(a.getInputStream(), b.getOutputStream())
-        runCatching { b.shutdownOutput() }
-        runCatching { other.get() }
-        runCatching { a.close() }
-        runCatching { b.close() }
+        track(b)
+        try {
+            a.soTimeout = 0; b.soTimeout = 0
+            val other = pool.submit { copy(b.getInputStream(), a.getOutputStream()); runCatching { a.shutdownOutput() } }
+            copy(a.getInputStream(), b.getOutputStream())
+            runCatching { b.shutdownOutput() }
+            runCatching { other.get() }
+        } finally {
+            runCatching { a.close() }
+            runCatching { b.close() }
+            untrack(b)
+        }
     }
 
     private fun copy(from: InputStream, to: OutputStream) {
@@ -220,9 +259,9 @@ class ExitRouter(
      * Birliktelik, denetim TCP bağlantısı kapanana kadar sürer.
      */
     private fun udpAssociate(client: Socket) {
-        val control = Socket()
-        val local = DatagramSocket(InetSocketAddress(loopback, 0))
-        val up = DatagramSocket(InetSocketAddress(loopback, 0))
+        val control = track(Socket())
+        val local = track(DatagramSocket(InetSocketAddress(loopback, 0)))
+        val up = track(DatagramSocket(InetSocketAddress(loopback, 0)))
         try {
             control.connect(InetSocketAddress(loopback, byeDpiPort), 5_000)
             control.soTimeout = HANDSHAKE_TIMEOUT_MS
@@ -285,6 +324,7 @@ class ExitRouter(
             runCatching { up.close() }
             runCatching { control.close() }
             runCatching { client.close() }
+            untrack(local); untrack(up); untrack(control)
         }
     }
 

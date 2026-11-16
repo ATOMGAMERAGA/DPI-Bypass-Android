@@ -1,6 +1,7 @@
 package net.atom.dpibypass.dns
 
 import android.util.Log
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -72,12 +73,7 @@ enum class DohProvider(
 class DohResolver(
     private val endpointUrl: String = DohProvider.Cloudflare.url,
 ) {
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
-        .callTimeout(6, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val client: OkHttpClient get() = sharedClient
 
     /**
      * Verilen host için IP adreslerini döndürür (önce A, boşsa AAAA).
@@ -90,7 +86,11 @@ class DohResolver(
 
     private fun resolveType(host: String, type: Int): List<String> {
         return try {
-            val url = "$endpointUrl?name=$host&type=$type"
+            val base = endpointUrl.toHttpUrlOrNull() ?: return emptyList()
+            val url = base.newBuilder()
+                .addQueryParameter("name", host)
+                .addQueryParameter("type", type.toString())
+                .build()
             val request = Request.Builder()
                 .url(url)
                 .header("Accept", "application/dns-json")
@@ -117,5 +117,15 @@ class DohResolver(
 
     companion object {
         private const val TAG = "DohResolver"
+
+        /** Tüm çözümleyiciler bağlantıları paylaşır: aynı DoH sunucusuna tekrar TLS kurulmaz. */
+        private val sharedClient: OkHttpClient by lazy {
+            net.atom.dpibypass.util.Http.base.newBuilder()
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .callTimeout(6, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }
     }
 }
