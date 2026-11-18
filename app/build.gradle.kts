@@ -399,6 +399,29 @@ tasks.preBuild {
 }
 
 // ---------------------------------------------------------------------------
+// Robolectric'in Android jar'ı (SDK 34) test SIRASINDA indirilmez: Robolectric'in
+// kendi indiricisi yeniden denemez ve önbelleğe alınmaz; Maven Central CI'da
+// istek sınırına (429) takılınca arayüz testleri koddan bağımsız olarak
+// düşüyordu. Jar Gradle ile çözülür (önbellekli, yeniden denemeli) ve
+// Robolectric çevrimdışı kipte bu klasörden okur. Testlerde yeni bir SDK
+// kullanılırsa sürümü buraya eklenmeli.
+// ---------------------------------------------------------------------------
+val robolectricRuntime: Configuration by configurations.creating
+dependencies {
+    robolectricRuntime("org.robolectric:android-all-instrumented:14-robolectric-10818077-i6")
+}
+val robolectricDeps = layout.buildDirectory.dir("robolectric-deps")
+val prepareRobolectricDeps = tasks.register<Copy>("prepareRobolectricDeps") {
+    from(robolectricRuntime)
+    into(robolectricDeps)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(prepareRobolectricDeps)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricDeps.get().asFile.absolutePath)
+}
+
+// ---------------------------------------------------------------------------
 // Release imzası kapısı — yanlışlıkla debug anahtarıyla imzalanmış bir sürümün
 // dağıtılmasını engeller. assembleRelease / bundleRelease bu göreve bağlıdır.
 // ---------------------------------------------------------------------------
