@@ -177,6 +177,9 @@ data class ExitStatus(
     val direct: Int = 0,
     val failures: Int = 0,
     val quicBlocked: Int = 0,
+    /** VPN Tüneli uygulamalarından WireGuard'a giden bağlantılar. */
+    val viaApp: Int = 0,
+    val lastAppHost: String = "",
     val lastExitHost: String = "",
     val lastError: String = "",
     val lastErrorAtMs: Long = 0,
@@ -194,6 +197,7 @@ object ExitStatusBoard {
     fun stopped() = _status.update { it.copy(running = false) }
     fun exit(host: String) = _status.update { it.copy(viaExit = it.viaExit + 1, lastExitHost = host) }
     fun direct() = _status.update { it.copy(direct = it.direct + 1) }
+    fun app(host: String) = _status.update { it.copy(viaApp = it.viaApp + 1, lastAppHost = host) }
     fun quic() = _status.update { it.copy(quicBlocked = it.quicBlocked + 1) }
     fun failure(host: String, reason: String) = _status.update {
         it.copy(failures = it.failures + 1, lastError = "$host: $reason", lastErrorAtMs = System.currentTimeMillis())

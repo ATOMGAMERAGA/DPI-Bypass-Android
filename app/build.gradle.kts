@@ -230,6 +230,145 @@ val prepareNativeSources = tasks.register<Sync>("prepareNativeSources") {
                 header.writeText("#include \"$relativeTarget\"\n")
             }
         }
+        patchHevSourceAddress(root.resolve("hev-socks5-tunnel/src"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hev yaması (yalnız kopyalanan derleme ağacında; submodül değişmez):
+// her oturum, uygulamanın TUN üzerindeki KAYNAK adresini ("ip|port") SOCKS5
+// kullanıcı adı olarak ExitRouter'a iletir. Yönlendirici bununla Android'den
+// bağlantının sahibi olan uygulamayı (UID) sorar ve "VPN uygulamaları WireGuard'a,
+// DPI uygulamaları ByeDPI'a" ayrımını uygulama bazında yapar.
+// Yama tutmazsa (hev güncellendi) derleme açıkça durur.
+// ---------------------------------------------------------------------------
+fun patchHevSourceAddress(src: File) {
+    fun patch(file: File, anchor: String, replacement: String) {
+        val text = file.readText()
+        if (text.contains(replacement)) return
+        check(text.contains(anchor)) { "hev yaması uygulanamadı: ${file.name} içinde beklenen satır yok" }
+        file.writeText(text.replaceFirst(anchor, replacement))
+    }
+    val helper = """
+        |#include <stdio.h>
+        |#include <arpa/inet.h>
+        |static void dpib_src_user (char *out, size_t size, const ip_addr_t *ip, u16_t port)
+        |{
+        |    struct sockaddr_in6 ss;
+        |    char host[INET6_ADDRSTRLEN] = { 0 };
+        |    memset (&ss, 0, sizeof (ss));
+        |    lwip_to_sock_addr (ip, port, (struct sockaddr *)&ss);
+        |    if (((struct sockaddr *)&ss)->sa_family == AF_INET)
+        |        inet_ntop (AF_INET, &((struct sockaddr_in *)&ss)->sin_addr, host, sizeof (host));
+        |    else
+        |        inet_ntop (AF_INET6, &ss.sin6_addr, host, sizeof (host));
+        |    snprintf (out, size, "%s|%u", host, (unsigned)port);
+        |}
+        |static int dpib_src_enabled (void)
+        |{
+        |    HevConfigServer *srv = hev_config_get_socks5_server ();
+        |    return srv->user && 0 == strcmp (srv->user, "dpib-src");
+        |}
+        |""".trimMargin()
+    val tcpC = src.resolve("hev-socks5-session-tcp.c")
+    val udpC = src.resolve("hev-socks5-session-udp.c")
+    // Kaynak adresi yalnız yapılandırmada `username: 'dpib-src'` varsa gönderilir
+    // (ExitRouter çalışırken). ByeDPI kullanıcı adı yöntemini kabul etmez; hev ona
+    // doğrudan bağlandığında eski davranış (kimlik doğrulamasız) aynen korunur.
+    patch(
+        src.resolve("hev-socks5-session.c"),
+        "    if (srv->user && srv->pass) {",
+        "    if (srv->user && srv->pass && 0 != strcmp (srv->user, \"dpib-src\")) {",
+    )
+    patch(src.resolve("hev-socks5-session-tcp.h"), "    HevRingBuffer *buffer;\n};", "    HevRingBuffer *buffer;\n    char dpib_user[80];\n};")
+    patch(src.resolve("hev-socks5-session-udp.h"), "    int frames;\n};", "    int frames;\n    char dpib_user[80];\n};")
+    patch(tcpC, "#include \"hev-socks5-session-tcp.h\"\n", "#include \"hev-socks5-session-tcp.h\"\n$helper")
+    patch(udpC, "#include \"hev-socks5-session-udp.h\"\n", "#include \"hev-socks5-session-udp.h\"\n$helper")
+    patch(
+        tcpC,
+        "    res = hev_socks5_client_tcp_construct_ip (&self->base, addr);\n    if (res < 0)\n        return -1;\n",
+        "    res = hev_socks5_client_tcp_construct_ip (&self->base, addr);\n    if (res < 0)\n        return -1;\n" +
+            "    if (dpib_src_enabled ()) {\n" +
+            "        dpib_src_user (self->dpib_user, sizeof (self->dpib_user), &pcb->remote_ip, pcb->remote_port);\n" +
+            "        hev_socks5_client_set_auth (HEV_SOCKS5_CLIENT (self), self->dpib_user, \"-\");\n" +
+            "    }\n",
+    )
+    patch(
+        udpC,
+        "    res = hev_socks5_client_udp_construct (&self->base, type);\n    if (res < 0)\n        return -1;\n",
+        "    res = hev_socks5_client_udp_construct (&self->base, type);\n    if (res < 0)\n        return -1;\n" +
+            "    if (dpib_src_enabled ()) {\n" +
+            "        dpib_src_user (self->dpib_user, sizeof (self->dpib_user), &pcb->remote_ip, pcb->remote_port);\n" +
+            "        hev_socks5_client_set_auth (HEV_SOCKS5_CLIENT (self), self->dpib_user, \"-\");\n" +
+            "    }\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// WireGuard köprüsü (src/main/go/wgbridge): Go ile her ABI için libwgbridge.so.
+// Windscribe/Proton'un WireGuard yapılandırması uygulamanın KENDİ tünelinde
+// çalışır (Android aynı anda tek VPN'e izin verdiği için). Go bulunamazsa yerel
+// derlemede uyarı verilip atlanır (özellik ekranda "bu derlemede yok" der);
+// CI'da (CI=true) eksiklik derlemeyi durdurur.
+// ---------------------------------------------------------------------------
+val wgBridgeSrc = file("src/main/go/wgbridge")
+val wgBridgeOut = layout.buildDirectory.dir("intermediates/wgbridgeLibs")
+android.sourceSets.getByName("main").jniLibs.srcDir(wgBridgeOut)
+
+fun findGo(): String? {
+    val exe = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "go.exe" else "go"
+    val candidates = buildList {
+        System.getenv("GOROOT")?.let { add(File(it, "bin/$exe")) }
+        System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(File(it, exe)) }
+        add(File("/usr/local/go/bin/$exe"))
+    }
+    return candidates.firstOrNull { it.isFile && it.canExecute() }?.absolutePath
+}
+
+val buildWgBridge = tasks.register("buildWgBridge") {
+    group = "build"
+    description = "WireGuard→SOCKS5 köprüsünü (Go) her ABI için derler."
+    inputs.dir(wgBridgeSrc)
+    outputs.dir(wgBridgeOut)
+    doLast {
+        val go = findGo()
+        val out = wgBridgeOut.get().asFile
+        if (go == null) {
+            if (System.getenv("CI") == "true") throw GradleException("Go bulunamadı: WireGuard köprüsü derlenemiyor (CI'da zorunlu).")
+            logger.warn("UYARI: Go bulunamadı; WireGuard köprüsü (VPN Tüneli) bu derlemeye girmeyecek.")
+            out.deleteRecursively()
+            return@doLast
+        }
+        val osName = System.getProperty("os.name").lowercase()
+        val hostTag = when {
+            osName.startsWith("windows") -> "windows-x86_64"
+            osName.contains("mac") -> "darwin-x86_64"
+            else -> "linux-x86_64"
+        }
+        val ext = if (osName.startsWith("windows")) ".cmd" else ""
+        val bin = android.ndkDirectory.resolve("toolchains/llvm/prebuilt/$hostTag/bin")
+        val abis = listOf(
+            Triple("arm64-v8a", "arm64", "aarch64-linux-android26-clang"),
+            Triple("armeabi-v7a", "arm", "armv7a-linux-androideabi26-clang"),
+            Triple("x86_64", "amd64", "x86_64-linux-android26-clang"),
+        )
+        abis.forEach { (abi, goArch, clang) ->
+            val dir = out.resolve(abi).apply { mkdirs() }
+            val target = dir.resolve("libwgbridge.so")
+            val proc = ProcessBuilder(
+                go, "build", "-buildmode=c-shared", "-trimpath", "-buildvcs=false",
+                "-ldflags=-s -w -buildid= -extldflags=-Wl,-z,max-page-size=16384,-soname,libwgbridge.so",
+                "-o", target.absolutePath, ".",
+            ).directory(wgBridgeSrc).redirectErrorStream(true).apply {
+                environment().putAll(mapOf(
+                    "CGO_ENABLED" to "1", "GOOS" to "android", "GOARCH" to goArch, "GOARM" to "7",
+                    "CC" to bin.resolve(clang + ext).absolutePath, "GOFLAGS" to "-mod=readonly",
+                ))
+            }.start()
+            val log = proc.inputStream.bufferedReader().readText()
+            if (proc.waitFor() != 0) throw GradleException("wgbridge ($abi) derlenemedi:\n$log")
+            dir.resolve("libwgbridge.h").delete()
+        }
     }
 }
 
@@ -256,7 +395,7 @@ tasks.register<Exec>("runNdkBuild") {
 }
 
 tasks.preBuild {
-    dependsOn("runNdkBuild")
+    dependsOn("runNdkBuild", buildWgBridge)
 }
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ Uygulamayı kapatmak için ana ekrandaki düğmeye tekrar dokunabilir veya bildi
 | Durum | Denenecek adım |
 | --- | --- |
 | Bağlanmıyor | İnternet bağlantını kontrol et. Android'in VPN izninin verildiğinden emin ol; başka bir VPN açıksa kapatıp yeniden dene. |
+| Windscribe / Proton ile birlikte kullanmak istiyorum | İki VPN uygulaması aynı anda çalışmaz. **VPN Tüneli** ekranından sağlayıcının WireGuard dosyasını ekle ve VPN'den geçecek uygulamaları seç; ikisi tek tünelde birlikte çalışır. |
+| VPN Tüneli "ulaşılamıyor" diyor | **VPN'i test et**'e dokun. Sağlayıcıdan başka bir konum (ya da Windscribe'da 443 portu) için yeni dosya indir; ücretsiz Proton sunucuları yoğun saatlerde dolabilir. |
 | Bağlandı ama hedef uygulama açılmıyor | **Uygulamalar** sekmesinde hedef uygulamanın kapsama girdiğini kontrol et. Ardından **Mod** sekmesinde otomatik yöntemi dene. |
 | DNS veya sesli görüşme bozuldu | **Ayarlar** bölümündeki **UDP/QUIC'i tünelde düşür** seçeneğini kapat. Bu ayar DNS sorgularını ve UDP kullanan görüşmeleri etkileyebilir. |
 | Telefon uygulamayı arka planda durduruyor | **Ayarlar** bölümündeki pil optimizasyonu yönlendirmesini kullan. Gerekirse uygulamayı tekrar açıp bağlan. |
@@ -45,6 +47,7 @@ Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-Androi
 - **DNS seçenekleri:** Cloudflare, AdGuard, Google veya özel adres. Ayar değişince açık tünel yeniden yapılandırılır.
 - **Uygulama kapsamı:** Tüm uygulamalar, yalnızca seçilenler veya seçilenler hariç.
 - **Sosyal Erişim — e-Devlet doğrulaması olmadan:** Alt gezinmedeki **Sosyal Erişim** sekmesi. Platformlar kimlik doğrulamasını bağlantının geldiği ülkeye bakarak ister; DPI aşma bunu çözmez çünkü trafik yine Türkiye IP'sinden çıkar. Bu yüzden yalnızca seçtiğin platformların (Instagram/Threads, Facebook, X, TikTok, YouTube, Reddit, Discord, Twitch, Snapchat, Bluesky, Kick ya da kendi eklediğin alan adları) bağlantıları **senin verdiğin yurt dışındaki SOCKS5/HTTP proxy sunucusundan** çıkar; bankacılık, e-Devlet, oyunlar ve diğer her şey eskisi gibi yerel DPI motorundan doğrudan gider. Ayrım bağlantının ilk paketindeki alan adına (TLS SNI / HTTP Host) göre cihazda yapılır. Sunucuya ulaşılamazsa platform bağlantısı Türkiye'den gönderilmez, kesilir; QUIC (UDP/443) bu modda kapatılır, IPv6 tünele alınır ki platform trafiği tünelin yanından sızmasın. **Sunucuyu test et** düğmesi sunucunun çıkış ülkesini ölçer ve Türkiye'de olan sunucuyu reddeder. Uygulama sunucu sağlamaz. Hesap +90 numaraya bağlıysa, daha önce doğrulama başlatıldıysa ya da konum izni açıksa platform IP'ye bakmadan da isteyebilir; ekran bunları da açıkça söyler. Ayrıntılar: [docs/social-access-alpha.md](docs/social-access-alpha.md).
+- **VPN Tüneli — Windscribe / Proton VPN ile aynı anda:** **Sosyal Erişim → Yurt dışı çıkış → VPN Tüneli** (ya da **Uygulamalar** sekmesinin üstündeki kart). Android aynı anda yalnızca bir VPN uygulaması çalıştırır; Windscribe açıkken DPI Bypass'ı açarsan Windscribe kapanır. Bu yüzden sağlayıcının **WireGuard yapılandırma dosyası** DPI Bypass'ın kendi tünelinin içinde çalışır ve tek tünelde üç yol olur: seçtiğin uygulamalar VPN'den (yurt dışından), **Uygulamalar** sekmesindeki kapsam (Tümü / Yalnızca seçili / Seçili hariç) DPI motorundan, geri kalan her şey doğrudan gider. Örnek: DPI kapsamı "Yalnızca Discord", VPN'de Instagram ve X — Discord DPI motorundan, Instagram ve X VPN'den, banka ve oyunlar doğrudan. Dosyayı Proton VPN'den ücretsiz hesapla (account.protonvpn.com → Downloads → WireGuard configuration) ya da Windscribe'dan (Pro / Build-a-Plan: Hesabım → Config Generator → WireGuard) al; **Dosya seç** ya da **Yapıştır** ile ekle, **VPN'i test et** çıkış ülkesini ölçer. Sağlayıcının uygulamasını açman gerekmez; bağlanırken Windscribe ya da Proton açıksa uygulama önce sorar. İstersen **Sosyal platformları da VPN'den çıkar** ile Sosyal Erişim'in yurt dışı çıkışı da bu VPN olur — kendi sunucun gerekmez. VPN'e ulaşılamazsa VPN uygulamalarının bağlantıları Türkiye'den gönderilmez, kesilir. WireGuard özel anahtarı yalnız bu cihazda kalır, Android yedeğine girmez. Ayrıntılar: [docs/vpn-tunnel.md](docs/vpn-tunnel.md).
 - **Bağlantı sorunu rehberi (Alpha):** Platform e-Devlet ekranı değil de hiç açılmıyorsa. Adım adım rehber: her sayfada tek soru ya da görev (uygulama → işlem → sorun → gerekiyorsa bağlantı hazırlığı → deneme → "ne oldu?"). YouTube, Instagram, X, TikTok, Discord, Reddit, Facebook, Telegram, WhatsApp, Signal, Twitch, Snapchat ya da kendi verdiğin bir alan adı için **birlikte çalışan ortak** yerel DPI planını arar. Her yöntem seçili bütün uygulamalarda, yöntemin gerçek yolundan (yerel motor) ölçülür; çalışan bir uygulamayı bozan yöntem reddedilir. Onaylanan plan DNS/QUIC/kapsam değişikliğinde kaybolmaz, yalnızca kısa bir yeniden doğrulama yapılır. Ağ yolu, içerik, medya ve ses ayrı gösterilir: ağ yolunun açılması içeriğin ya da sesli görüşmenin çalıştığını kanıtlamaz; bunlar için onayın istenir. Ayrıntılar: [docs/social-access-alpha.md](docs/social-access-alpha.md).
 - **Hızlı Panel ve bildirim:** Uygulamaya dönmeden bağlantıyı yönetme.
 - **Tablet düzeni:** Geniş ekranlarda etiketli yan gezinme ve okunabilir genişlikte içerik; telefonun alt gezinmesi korunur.
@@ -55,18 +58,19 @@ Sorun sürerse [GitHub Issues](https://github.com/ATOMGAMERAGA/DPI-Bypass-Androi
 
 ## Geliştiriciler için
 
-**Gereksinimler:** JDK 17, Android SDK, NDK `26.3.11579264` ve CMake `3.22.1`.
+**Gereksinimler:** JDK 17, Android SDK, NDK `26.3.11579264`, CMake `3.22.1` ve Go 1.23+.
 
 ```bash
 git clone --recurse-submodules https://github.com/ATOMGAMERAGA/DPI-Bypass-Android.git
 cd DPI-Bypass-Android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 node --test tests/observer.test.cjs
+(cd app/src/main/go/wgbridge && go test ./...)
 ```
 
 Windows'ta son satır için `gradlew.bat` kullan. Submodüller eksikse `git submodule update --init --recursive` çalıştır. Debug APK `app/build/outputs/apk/debug/` altında oluşur; son kullanıcıya dağıtılacak sürüm yerine geçmez.
 
-Uygulama Android `VpnService` ile yerel TUN açar; [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) trafiği yerel SOCKS5 bağlantısına, [ByeDPI](https://github.com/hufrea/byedpi) DPI aşma motoruna taşır. Bağımlılık ve lisans bilgileri [NOTICE](NOTICE) dosyasında. Sürüm `gradle.properties` içindeki `VERSION_NAME` ve `VERSION_CODE` ile yönetilir. İmzalı sürüm hazırlama adımları [İmzalama Rehberi](docs/Imzalama-Rehberi.md) ve [CI/CD rehberi](CI-CD-ve-Google-Rehberi.md) içinde.
+Uygulama Android `VpnService` ile yerel TUN açar; [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) trafiği yerel SOCKS5 bağlantısına, [ByeDPI](https://github.com/hufrea/byedpi) DPI aşma motoruna taşır. VPN Tüneli için [wireguard-go](https://git.zx2c4.com/wireguard-go) + gVisor netstack, `app/src/main/go/wgbridge` altında Go ile `libwgbridge.so` olarak derlenir (Go 1.23+ gerekir; Go yoksa yerel derleme uyarı verip bu özelliği atlar, CI'da zorunludur). hev, derleme sırasında kopyalanan ağaçta küçük bir yamayla her bağlantının kaynak adresini yönlendiriciye iletir; uygulama bazlı ayrım bununla yapılır (bkz. `app/build.gradle.kts`, `patchHevSourceAddress`). Bağımlılık ve lisans bilgileri [NOTICE](NOTICE) dosyasında. Sürüm `gradle.properties` içindeki `VERSION_NAME` ve `VERSION_CODE` ile yönetilir. İmzalı sürüm hazırlama adımları [İmzalama Rehberi](docs/Imzalama-Rehberi.md) ve [CI/CD rehberi](CI-CD-ve-Google-Rehberi.md) içinde.
 
 ## Lisans
 

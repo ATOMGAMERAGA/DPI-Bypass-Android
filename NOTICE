@@ -29,4 +29,20 @@ the Free Software Foundation, either version 3 of the License, or
      incelenip temel alınmıştır. cpp/native-lib.c, cpp/utils.c, jni/*.mk
      dosyaları bu projeden uyarlanmıştır (paket adı değiştirilerek).
 
+4) wireguard-go (golang.zx2c4.com/wireguard)
+   - Kaynak: https://git.zx2c4.com/wireguard-go
+   - Lisans: MIT
+   - Rol: VPN Tüneli'nin WireGuard istemcisi (app/src/main/go/wgbridge,
+     libwgbridge.so). "WireGuard" Jason A. Donenfeld'in tescilli markasıdır.
+
+5) gVisor netstack (gvisor.dev/gvisor)
+   - Kaynak: https://github.com/google/gvisor
+   - Lisans: Apache-2.0
+   - Rol: WireGuard tünelinin kullanıcı alanındaki TCP/IP yığını.
+
+6) golang.org/x/crypto, golang.org/x/net, golang.org/x/sys, golang.org/x/time,
+   github.com/google/btree
+   - Lisans: BSD-3-Clause (x/*), Apache-2.0 (btree)
+   - Rol: wireguard-go ve gVisor bağımlılıkları.
+
 Bu bileşenlerin GPL-3.0 olması nedeniyle bu uygulama da GPL-3.0 olarak yayımlanır.

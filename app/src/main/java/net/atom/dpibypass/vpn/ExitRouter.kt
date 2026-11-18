@@ -5,6 +5,7 @@ import net.atom.dpibypass.social.ExitMatcher
 import net.atom.dpibypass.social.ExitServer
 import net.atom.dpibypass.social.ExitStatusBoard
 import net.atom.dpibypass.social.Sniff
+import net.atom.dpibypass.wg.WireGuardConfig
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
@@ -25,8 +26,9 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * hev-socks5-tunnel ile ByeDPI arasına giren yerel SOCKS5 yönlendirici.
  *
- *   TUN -> hev -> ExitRouter --(platform alan adı)--> yurt dışı proxy -> platform
- *                            \--(diğer her şey)----> ByeDPI -> İnternet
+ *   TUN -> hev -> ExitRouter --(VPN Tüneli uygulaması)--> WireGuard köprüsü -> sağlayıcı
+ *                            |--(platform alan adı)-----> yurt dışı çıkış -> platform
+ *                            \--(diğer her şey)---------> ByeDPI -> İnternet
  *
  * hev bağlantıları IP adresiyle ister; alan adı bilinmez. Bu yüzden 443/80
  * portundaki bağlantılarda SOCKS yanıtı hemen verilir, uygulamanın ilk paketi
@@ -43,10 +45,36 @@ import java.util.concurrent.atomic.AtomicReference
 class ExitRouter(
     private val listenPort: Int,
     private val byeDpiPort: Int,
-    private val server: ExitServer,
-    private val matcher: ExitMatcher,
+    private val routes: Routes,
     private val log: (String) -> Unit = {},
 ) : Closeable {
+    constructor(listenPort: Int, byeDpiPort: Int, server: ExitServer, matcher: ExitMatcher, log: (String) -> Unit = {}) :
+        this(listenPort, byeDpiPort, Routes(domainExit = server, matcher = matcher), log)
+
+    /**
+     * Yönlendirme kuralları (öncelik sırasıyla):
+     *  1. [appUids] içindeki uygulamaların BÜTÜN trafiği (TCP + UDP) [appExit]
+     *     (VPN Tüneli / WireGuard köprüsü) üzerinden;
+     *  2. [matcher]'a uyan alan adları [domainExit] (Sosyal Erişim yurt dışı çıkışı) üzerinden;
+     *  3. geri kalan her şey ByeDPI (yerel DPI aşma) üzerinden.
+     * Seçili yol kurulamazsa bağlantı KAPATILIR; Türkiye'den doğrudan gönderilmez.
+     */
+    data class Routes(
+        val domainExit: ExitServer? = null,
+        val matcher: ExitMatcher = ExitMatcher(emptyList()),
+        val appExit: ExitServer? = null,
+        val appUids: Set<Int> = emptySet(),
+        val owner: ConnectionOwner? = null,
+    ) {
+        val domainActive: Boolean get() = domainExit != null && !matcher.isEmpty
+        val appActive: Boolean get() = appExit != null && appUids.isNotEmpty() && owner != null
+        /** Ekranda gösterilen özet. */
+        val display: String get() = listOfNotNull(
+            domainExit?.takeIf { domainActive }?.display,
+            appExit?.takeIf { appActive }?.let { "VPN Tüneli · ${appUids.size} uygulama" },
+        ).joinToString(" + ")
+    }
+
     private val loopback: InetAddress = InetAddress.getByName("127.0.0.1")
     private val pool: ExecutorService = Executors.newCachedThreadPool { r -> Thread(r, "exit-router").apply { isDaemon = true } }
     private var serverSocket: ServerSocket? = null
@@ -72,7 +100,7 @@ class ExitRouter(
         ss.reuseAddress = true
         ss.bind(InetSocketAddress(loopback, listenPort), 256)
         serverSocket = ss
-        ExitStatusBoard.started(server.display)
+        ExitStatusBoard.started(routes.display)
         pool.execute {
             while (!closed) {
                 val client = try { ss.accept() } catch (e: IOException) { break }
@@ -111,15 +139,28 @@ class ExitRouter(
             client.soTimeout = HANDSHAKE_TIMEOUT_MS
             val input = client.getInputStream()
             val out = client.getOutputStream()
-            // Karşılama: yöntem listesi okunur, "kimlik doğrulama yok" seçilir.
+            // Karşılama: hev (yamalı) kaynak adresini kullanıcı adı olarak gönderir
+            // ("ip|port"); bu yöntem sunulduysa seçilir, yoksa kimlik doğrulamasız.
             val greet = ExitConnector.readExact(input, 2)
             if (greet[0].toInt() != 5) return client.close()
-            ExitConnector.readExact(input, greet[1].toInt() and 0xFF)
-            out.write(byteArrayOf(5, 0)); out.flush()
+            val methods = ExitConnector.readExact(input, greet[1].toInt() and 0xFF)
+            var source: InetSocketAddress? = null
+            if (methods.contains(2.toByte())) {
+                out.write(byteArrayOf(5, 2)); out.flush()
+                val ver = ExitConnector.readExact(input, 2)
+                val user = String(ExitConnector.readExact(input, ver[1].toInt() and 0xFF), Charsets.US_ASCII)
+                val passLen = input.read()
+                if (passLen < 0) return client.close()
+                ExitConnector.readExact(input, passLen)
+                out.write(byteArrayOf(1, 0)); out.flush()
+                source = ConnectionOwner.parseSource(user)
+            } else {
+                out.write(byteArrayOf(5, 0)); out.flush()
+            }
             val request = readRequest(input) ?: return client.close()
             when (request.cmd) {
-                CMD_CONNECT -> connect(client, request)
-                CMD_UDP_ASSOCIATE -> udpAssociate(client)
+                CMD_CONNECT -> connect(client, request, source)
+                CMD_UDP_ASSOCIATE -> udpAssociate(client, source)
                 else -> {
                     // hev'in kendi UDP-over-TCP komutu dahil: desteklenmez (QUIC kapalı kipte de böyleydi).
                     out.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
@@ -151,8 +192,24 @@ class ExitRouter(
         return Request(head[1].toInt() and 0xFF, head + addr + portBytes, port, host)
     }
 
-    private fun connect(client: Socket, request: Request) {
+    /** Bağlantı VPN Tüneli'ne yönlendirilen bir uygulamadan mı geliyor? */
+    private fun isAppRoute(udp: Boolean, source: InetSocketAddress?, host: String, port: Int): Boolean {
+        if (!routes.appActive || source == null) return false
+        if (!WireGuardConfig.validIp(host)) return false
+        val dst = runCatching { InetSocketAddress(InetAddress.getByName(host), port) }.getOrNull() ?: return false
+        val uid = runCatching { routes.owner?.uid(udp, source, dst) }.getOrNull() ?: return false
+        return uid in routes.appUids
+    }
+
+    private fun connect(client: Socket, request: Request, source: InetSocketAddress?) {
         val out = client.getOutputStream()
+        if (isAppRoute(false, source, request.host, request.port)) return connectViaApp(client, request)
+        if (!routes.domainActive) {
+            // Yalnız VPN Tüneli etkin: diğer uygulamalar eskisi gibi doğrudan ByeDPI'a.
+            val upstream = openByeDpi(request.raw) ?: return client.close()
+            ExitStatusBoard.direct()
+            return pipe(client, upstream)
+        }
         if (request.port != 443 && request.port != 80) {
             // Sunucunun önce konuştuğu protokoller olabilir; ilk paket beklenmez.
             val upstream = openByeDpi(request.raw) ?: return client.close()
@@ -160,24 +217,11 @@ class ExitRouter(
             return pipe(client, upstream)
         }
         out.write(OK_REPLY); out.flush()
-        val buf = ByteArray(Sniff.MAX_BYTES)
-        var len = 0
-        var sniffed: Sniff.Result = Sniff.Result.NeedMore
-        client.soTimeout = SNIFF_TIMEOUT_MS
-        try {
-            while (sniffed == Sniff.Result.NeedMore && len < buf.size) {
-                val r = client.getInputStream().read(buf, len, buf.size - len)
-                if (r < 0) break
-                len += r
-                sniffed = Sniff.host(buf, len)
-            }
-        } catch (_: SocketTimeoutException) {
-        }
-        val first = buf.copyOf(len)
-        val host = (sniffed as? Sniff.Result.Host)?.name
-        if (host != null && matcher.matches(host)) {
+        val (first, host) = sniff(client)
+        val domainExit = routes.domainExit
+        if (host != null && domainExit != null && routes.matcher.matches(host)) {
             val remote = try {
-                ExitConnector.open(server, host, request.port, UPSTREAM_TIMEOUT_MS)
+                ExitConnector.open(domainExit, host, request.port, UPSTREAM_TIMEOUT_MS)
             } catch (e: IOException) {
                 // Kasıtlı: doğrudan yola DÜŞÜLMEZ. Platform Türkiye IP'sini görmesin.
                 ExitStatusBoard.failure(host, e.message ?: "bağlantı kurulamadı")
@@ -192,6 +236,58 @@ class ExitRouter(
         ExitStatusBoard.direct()
         upstream.getOutputStream().apply { if (first.isNotEmpty()) { write(first); flush() } }
         pipe(client, upstream)
+    }
+
+    /** İlk paketi okuyup alan adını (TLS SNI / HTTP Host) çıkarır. */
+    private fun sniff(client: Socket): Pair<ByteArray, String?> {
+        val buf = ByteArray(Sniff.MAX_BYTES)
+        var len = 0
+        var sniffed: Sniff.Result = Sniff.Result.NeedMore
+        client.soTimeout = SNIFF_TIMEOUT_MS
+        try {
+            while (sniffed == Sniff.Result.NeedMore && len < buf.size) {
+                val r = client.getInputStream().read(buf, len, buf.size - len)
+                if (r < 0) break
+                len += r
+                sniffed = Sniff.host(buf, len)
+            }
+        } catch (_: SocketTimeoutException) {
+        }
+        return buf.copyOf(len) to (sniffed as? Sniff.Result.Host)?.name
+    }
+
+    /**
+     * VPN Tüneli uygulamasının bağlantısı: bütünüyle WireGuard köprüsünden çıkar.
+     * 443/80'de alan adı okunabiliyorsa ad, sağlayıcının DNS'iyle (tünel içinde)
+     * çözülsün diye adla istenir; platform bölgeyi VPN ülkesine göre seçer.
+     */
+    private fun connectViaApp(client: Socket, request: Request) {
+        val exit = routes.appExit ?: return client.close()
+        val out = client.getOutputStream()
+        if (request.port == 443 || request.port == 80) {
+            out.write(OK_REPLY); out.flush()
+            val (first, host) = sniff(client)
+            val target = host ?: request.host
+            val remote = try {
+                ExitConnector.open(exit, target, request.port, UPSTREAM_TIMEOUT_MS)
+            } catch (e: IOException) {
+                ExitStatusBoard.failure(target, "VPN Tüneli: ${e.message ?: "bağlantı kurulamadı"}")
+                return client.close()
+            }
+            ExitStatusBoard.app(target)
+            remote.getOutputStream().apply { if (first.isNotEmpty()) { write(first); flush() } }
+            return pipe(client, remote)
+        }
+        val remote = try {
+            ExitConnector.open(exit, request.host, request.port, UPSTREAM_TIMEOUT_MS)
+        } catch (e: IOException) {
+            ExitStatusBoard.failure(request.host, "VPN Tüneli: ${e.message ?: "bağlantı kurulamadı"}")
+            runCatching { out.write(byteArrayOf(5, 4, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush() }
+            return client.close()
+        }
+        ExitStatusBoard.app(request.host)
+        out.write(OK_REPLY); out.flush()
+        pipe(client, remote)
     }
 
     /**
@@ -253,33 +349,48 @@ class ExitRouter(
         }
     }
 
-    /**
-     * UDP aktarımı: istemciye kendi yerel UDP soketimizi bildiririz, datagramları
-     * ByeDPI'ın UDP aktarımına iletiriz. Hedef portu 443 olanlar (QUIC) düşürülür.
-     * Birliktelik, denetim TCP bağlantısı kapanana kadar sürer.
-     */
-    private fun udpAssociate(client: Socket) {
+    /** Bir SOCKS5 sunucusunun (ByeDPI ya da WireGuard köprüsü) UDP aktarımı. */
+    private class UdpUpstream(val control: Socket, val relay: InetSocketAddress, val socket: DatagramSocket)
+
+    private fun openUdpUpstream(port: Int): UdpUpstream {
         val control = track(Socket())
-        val local = track(DatagramSocket(InetSocketAddress(loopback, 0)))
         val up = track(DatagramSocket(InetSocketAddress(loopback, 0)))
         try {
-            control.connect(InetSocketAddress(loopback, byeDpiPort), 5_000)
+            control.connect(InetSocketAddress(loopback, port), 5_000)
             control.soTimeout = HANDSHAKE_TIMEOUT_MS
             val cin = control.getInputStream()
             control.getOutputStream().apply { write(byteArrayOf(5, 1, 0)); flush() }
             ExitConnector.readExact(cin, 2)
             control.getOutputStream().apply { write(byteArrayOf(5, 3, 0, 1, 0, 0, 0, 0, 0, 0)); flush() }
             val head = ExitConnector.readExact(cin, 4)
-            if (head[1].toInt() != 0) throw IOException("ByeDPI UDP desteklemiyor")
+            if (head[1].toInt() != 0) throw IOException("UDP desteklenmiyor")
             val relayAddr = when (head[3].toInt()) {
                 1 -> InetAddress.getByAddress(ExitConnector.readExact(cin, 4))
                 4 -> InetAddress.getByAddress(ExitConnector.readExact(cin, 16))
                 else -> throw IOException()
             }.let { if (it.isAnyLocalAddress) loopback else it }
             val pb = ExitConnector.readExact(cin, 2)
-            val relay = InetSocketAddress(relayAddr, ((pb[0].toInt() and 0xFF) shl 8) or (pb[1].toInt() and 0xFF))
             control.soTimeout = 0
+            return UdpUpstream(control, InetSocketAddress(relayAddr, ((pb[0].toInt() and 0xFF) shl 8) or (pb[1].toInt() and 0xFF)), up)
+        } catch (e: Exception) {
+            runCatching { control.close() }; runCatching { up.close() }
+            untrack(control); untrack(up)
+            throw e
+        }
+    }
 
+    /**
+     * UDP aktarımı: istemciye kendi yerel UDP soketimizi bildiririz. İlk
+     * datagramın hedefiyle bağlantının sahibi (uygulama) belirlenir; VPN Tüneli
+     * uygulamasıysa datagramlar WireGuard köprüsüne, değilse ByeDPI'ın UDP
+     * aktarımına iletilir. Yurt dışı çıkış etkinken, VPN yolunda olmayan
+     * UDP/443 (QUIC) düşürülür (alan adı ilk pakette okunamaz).
+     * Birliktelik, denetim TCP bağlantısı kapanana kadar sürer.
+     */
+    private fun udpAssociate(client: Socket, source: InetSocketAddress?) {
+        val local = track(DatagramSocket(InetSocketAddress(loopback, 0)))
+        val upstream = AtomicReference<UdpUpstream?>(null)
+        try {
             val port = local.localPort
             client.getOutputStream().apply {
                 write(byteArrayOf(5, 0, 0, 1, 127, 0, 0, 1, (port shr 8).toByte(), port.toByte())); flush()
@@ -289,42 +400,67 @@ class ExitRouter(
             pool.execute {
                 val buf = ByteArray(65_535)
                 val packet = DatagramPacket(buf, buf.size)
+                var viaApp = false
                 try {
                     while (true) {
                         packet.setData(buf, 0, buf.size)
                         local.receive(packet)
                         clientAddr.set(InetSocketAddress(packet.address, packet.port))
-                        if (udpDestinationPort(buf, packet.length) == 443) { ExitStatusBoard.quic(); continue }
-                        up.send(DatagramPacket(buf, 0, packet.length, relay))
+                        var up = upstream.get()
+                        if (up == null) {
+                            val dst = udpDestination(buf, packet.length) ?: continue
+                            viaApp = isAppRoute(true, source, dst.first, dst.second)
+                            val exit = routes.appExit
+                            up = try {
+                                openUdpUpstream(if (viaApp && exit != null) exit.port else byeDpiPort)
+                            } catch (e: Exception) {
+                                if (viaApp) ExitStatusBoard.failure(dst.first, "VPN Tüneli UDP: ${e.message ?: "kurulamadı"}")
+                                break
+                            }
+                            upstream.set(up)
+                            if (viaApp) ExitStatusBoard.app(dst.first)
+                            startUdpBackward(up, local, clientAddr)
+                            pool.execute {
+                                runCatching { while (up.control.getInputStream().read() >= 0) Unit }
+                                runCatching { client.close() }
+                            }
+                        }
+                        if (!viaApp && routes.domainActive && udpDestinationPort(buf, packet.length) == 443) { ExitStatusBoard.quic(); continue }
+                        up.socket.send(DatagramPacket(buf, 0, packet.length, up.relay))
                     }
                 } catch (_: IOException) {
+                } catch (_: RejectedExecutionException) {
                 }
+                runCatching { client.close() }
             }
-            pool.execute {
-                val buf = ByteArray(65_535)
-                val packet = DatagramPacket(buf, buf.size)
-                try {
-                    while (true) {
-                        packet.setData(buf, 0, buf.size)
-                        up.receive(packet)
-                        val to = clientAddr.get() ?: continue
-                        local.send(DatagramPacket(buf, 0, packet.length, to))
-                    }
-                } catch (_: IOException) {
-                }
-            }
-            // Denetim bağlantısı (istemci ya da ByeDPI tarafı) kapanınca birliktelik biter.
-            val watcher = pool.submit { runCatching { while (control.getInputStream().read() >= 0) Unit }; runCatching { client.close() } }
+            // Denetim bağlantısı (istemci tarafı) kapanınca birliktelik biter.
             runCatching { while (client.getInputStream().read() >= 0) Unit }
-            watcher.cancel(true)
         } catch (e: Exception) {
             runCatching { client.getOutputStream().apply { write(byteArrayOf(5, 1, 0, 1, 0, 0, 0, 0, 0, 0)); flush() } }
         } finally {
             runCatching { local.close() }
-            runCatching { up.close() }
-            runCatching { control.close() }
+            untrack(local)
+            upstream.get()?.let { up ->
+                runCatching { up.socket.close() }; runCatching { up.control.close() }
+                untrack(up.socket); untrack(up.control)
+            }
             runCatching { client.close() }
-            untrack(local); untrack(up); untrack(control)
+        }
+    }
+
+    private fun startUdpBackward(up: UdpUpstream, local: DatagramSocket, clientAddr: AtomicReference<InetSocketAddress?>) {
+        pool.execute {
+            val buf = ByteArray(65_535)
+            val packet = DatagramPacket(buf, buf.size)
+            try {
+                while (true) {
+                    packet.setData(buf, 0, buf.size)
+                    up.socket.receive(packet)
+                    val to = clientAddr.get() ?: continue
+                    local.send(DatagramPacket(buf, 0, packet.length, to))
+                }
+            } catch (_: IOException) {
+            }
         }
     }
 
@@ -335,6 +471,19 @@ class ExitRouter(
         private const val SNIFF_TIMEOUT_MS = 4_000
         private const val UPSTREAM_TIMEOUT_MS = 10_000
         private val OK_REPLY = byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+
+        /** SOCKS5 UDP başlığından hedef IP ve port; alan adıysa ya da okunamazsa null. */
+        fun udpDestination(b: ByteArray, len: Int): Pair<String, Int>? {
+            if (len < 4) return null
+            val (addrLen, portAt) = when (b[3].toInt()) {
+                1 -> 4 to 8
+                4 -> 16 to 20
+                else -> return null
+            }
+            if (len < portAt + 2) return null
+            val ip = runCatching { InetAddress.getByAddress(b.copyOfRange(4, 4 + addrLen)).hostAddress }.getOrNull() ?: return null
+            return ip to (((b[portAt].toInt() and 0xFF) shl 8) or (b[portAt + 1].toInt() and 0xFF))
+        }
 
         /** SOCKS5 UDP başlığından hedef port; okunamazsa -1. */
         fun udpDestinationPort(b: ByteArray, len: Int): Int {
