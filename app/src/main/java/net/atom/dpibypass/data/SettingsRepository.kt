@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import net.atom.dpibypass.dns.DnsPlan
@@ -22,6 +23,13 @@ import org.json.JSONObject
 import java.io.IOException
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "dpi_settings")
+
+/**
+ * VPN Tüneli'nin WireGuard yapılandırması (özel anahtar içerir) ayrı dosyada
+ * tutulur ve Android yedeğinden hariçtir (res/xml/backup_rules.xml,
+ * data_extraction_rules.xml): anahtar Google yedeğine ya da başka cihaza gitmez.
+ */
+private val Context.secretStore: DataStore<Preferences> by preferencesDataStore(name = "vpn_secret")
 
 /** Tüm kullanıcı ayarlarının anlık görüntüsü. */
 data class Settings(
@@ -68,6 +76,16 @@ data class Settings(
     val exitServer: String = "",
     val exitPlatforms: Set<String> = emptySet(),
     val exitExtraDomains: String = "",
+    /** Yurt dışı çıkışın kaynağı: kendi proxy sunucusu ya da VPN Tüneli (WireGuard). */
+    val exitViaVpn: Boolean = false,
+    // VPN Tüneli: Windscribe / Proton VPN (ya da herhangi bir) WireGuard
+    // yapılandırması DPI Bypass'ın KENDİ tünelinde çalışır; [vpnApps] uygulamaların
+    // bütün trafiği oradan çıkar (bkz. wg/ ve vpn/ExitRouter).
+    val vpnTunnelEnabled: Boolean = false,
+    val vpnConfig: String = "",
+    val vpnApps: Set<String> = emptySet(),
+    /** Başka bir VPN (Windscribe/Proton uygulaması) açıkken bağlanmadan önce sor. */
+    val vpnConflictAsk: Boolean = true,
     /**
      * Değer DataStore'dan GERÇEKTEN okundu mu? `stateIn` başlangıç değeri olan
      * varsayılan `Settings()` için false'tur: arayüz o ilk değeri kullanıcının
@@ -116,16 +134,21 @@ private const val KEY_SAVED_AT = "at"
 
 class SettingsRepository(
     private val store: DataStore<Preferences>,
+    secretStore: DataStore<Preferences>? = null,
     private val samsungDefault: () -> Boolean = DeviceInfo::isSamsung,
 ) {
-    constructor(context: Context) : this(context.applicationContext.dataStore)
+    constructor(context: Context) : this(context.applicationContext.dataStore, secretStore = context.applicationContext.secretStore)
+
+    private val secrets: DataStore<Preferences> = secretStore ?: store
 
     /**
      * Okuma hatasında akış çökmez ve sessizce "her şey kapalı" da denmez:
      * varsayılanlar [Settings.readError] işaretiyle yayınlanır.
      */
-    val settings: Flow<Settings> = store.data
-        .map { p -> p.toSettings() }
+    val settings: Flow<Settings> = (if (secrets === store) store.data.map { p -> p.toSettings() }
+        else combine(store.data, secrets.data.catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }) { p, sec ->
+            p.toSettings().copy(vpnConfig = sec[Keys.VPN_CONFIG] ?: "")
+        })
         .catch { e -> if (e is IOException) emit(emptyPreferences().toSettings().copy(readError = true)) else throw e }
 
     private fun Preferences.toSettings(): Settings = Settings(
@@ -165,6 +188,11 @@ class SettingsRepository(
         exitPlatforms = this[Keys.EXIT_PLATFORMS]
             ?.filter { net.atom.dpibypass.social.ExitPlatform.byId(it) != null }?.toSet() ?: emptySet(),
         exitExtraDomains = this[Keys.EXIT_EXTRA_DOMAINS] ?: "",
+        exitViaVpn = this[Keys.EXIT_VIA_VPN] ?: false,
+        vpnTunnelEnabled = this[Keys.VPN_ENABLED] ?: false,
+        vpnConfig = this[Keys.VPN_CONFIG] ?: "",
+        vpnApps = this[Keys.VPN_APPS] ?: emptySet(),
+        vpnConflictAsk = this[Keys.VPN_CONFLICT_ASK] ?: true,
         loaded = true,
     )
 
@@ -244,6 +272,13 @@ class SettingsRepository(
     suspend fun setExitExtraDomains(v: String) = put(Keys.EXIT_EXTRA_DOMAINS, v.take(4096))
     suspend fun updateExitPlatforms(transform: (Set<String>) -> Set<String>) =
         store.edit { it[Keys.EXIT_PLATFORMS] = transform(it[Keys.EXIT_PLATFORMS] ?: emptySet()) }
+    suspend fun setExitViaVpn(v: Boolean) = put(Keys.EXIT_VIA_VPN, v)
+
+    suspend fun setVpnTunnelEnabled(v: Boolean) = put(Keys.VPN_ENABLED, v)
+    suspend fun setVpnConfig(v: String) = secrets.edit { it[Keys.VPN_CONFIG] = v.take(16_384) }
+    suspend fun setVpnConflictAsk(v: Boolean) = put(Keys.VPN_CONFLICT_ASK, v)
+    suspend fun updateVpnApps(transform: (Set<String>) -> Set<String>) =
+        store.edit { it[Keys.VPN_APPS] = transform(it[Keys.VPN_APPS] ?: emptySet()) }
 
     /** Birincil uygulama seçimi; seçili platformlara da eklenir (tek atomik yazım). */
     suspend fun setSocialPrimary(id: String) = store.edit {
@@ -302,6 +337,11 @@ class SettingsRepository(
         val EXIT_SERVER = stringPreferencesKey("exit_server")
         val EXIT_PLATFORMS = stringSetPreferencesKey("exit_platforms")
         val EXIT_EXTRA_DOMAINS = stringPreferencesKey("exit_extra_domains")
+        val EXIT_VIA_VPN = booleanPreferencesKey("exit_via_vpn")
+        val VPN_ENABLED = booleanPreferencesKey("vpn_tunnel_enabled")
+        val VPN_CONFIG = stringPreferencesKey("vpn_tunnel_config")
+        val VPN_APPS = stringSetPreferencesKey("vpn_tunnel_apps")
+        val VPN_CONFLICT_ASK = booleanPreferencesKey("vpn_conflict_ask")
         val SOCIAL_ENABLED = booleanPreferencesKey("social_access_enabled")
         val SOCIAL_MODE = stringPreferencesKey("social_access_mode")
         val SOCIAL_PLATFORMS = stringSetPreferencesKey("social_access_platforms")

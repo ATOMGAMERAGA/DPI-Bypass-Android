@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- VPN Tüneli'nin WireGuard özel anahtarı yedeklenmez (Android 11 ve öncesi). -->
+<full-backup-content>
+    <exclude domain="file" path="datastore/vpn_secret.preferences_pb" />
+</full-backup-content>

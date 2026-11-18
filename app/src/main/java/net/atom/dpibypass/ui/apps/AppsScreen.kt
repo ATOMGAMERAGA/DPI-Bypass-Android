@@ -73,6 +73,7 @@ import net.atom.dpibypass.ui.design.GlassLevel
 import net.atom.dpibypass.ui.design.pressScale
 import net.atom.dpibypass.ui.design.rememberHaptics
 import net.atom.dpibypass.ui.theme.Motion
+import net.atom.dpibypass.vpn.VpnTunnelConfig
 
 // ---------------------------------------------------------------------------
 // Uygulama ayırma (split tunneling) ekranı.
@@ -91,7 +92,7 @@ private val FAVORITES = setOf(
 )
 
 @Composable
-fun AppsScreen(viewModel: AppViewModel) {
+fun AppsScreen(viewModel: AppViewModel, onOpenVpn: () -> Unit = {}) {
     val tablet = LocalTabletLayout.current
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val apps by viewModel.apps.collectAsStateWithLifecycle()
@@ -104,6 +105,8 @@ fun AppsScreen(viewModel: AppViewModel) {
     val haptics = rememberHaptics()
 
     val listEnabled = settings.appFilterMode != AppFilterMode.All
+    // VPN Tüneli uygulamaları bu listedeki seçimden bağımsız olarak WireGuard'dan gider.
+    val vpnApps = if (VpnTunnelConfig.from(settings) != null) settings.vpnApps else emptySet()
     val selected = settings.selectedApps
     val filtered = remember(apps, query, selected) {
         val q = query.trim().lowercase()
@@ -151,6 +154,26 @@ fun AppsScreen(viewModel: AppViewModel) {
                         selected = settings.appFilterMode,
                         onSelect = viewModel::setAppFilterMode,
                     )
+                }
+
+                item(key = "vpn-tunnel") {
+                    AppCard(modifier = Modifier.fillMaxWidth(), onClick = onOpenVpn) {
+                        Column(Modifier.padding(18.dp)) {
+                            Text(
+                                text = if (vpnApps.isNotEmpty()) "VPN Tüneli: ${vpnApps.size} uygulama VPN'den gidiyor"
+                                else "Windscribe / Proton VPN ile birlikte kullan",
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                text = if (vpnApps.isNotEmpty()) "\"VPN\" etiketli uygulamalar buradaki seçimden bağımsız olarak VPN'den çıkar. " +
+                                    "Bu liste DPI motorunun kapsamıdır; kapsam dışındakiler doğrudan gider. Dokun: VPN uygulamalarını düzenle."
+                                else "Android aynı anda iki VPN çalıştırmaz. VPN'in WireGuard dosyasını ekle: seçtiğin uygulamalar VPN'den, " +
+                                    "buradakiler DPI motorundan, kalanlar doğrudan gitsin. Dokun: kur.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
 
                 if (settings.vodafoneUnlimitedMode) {
@@ -279,6 +302,7 @@ fun AppsScreen(viewModel: AppViewModel) {
                         AppRow(
                             app = app,
                             checked = app.packageName in selected,
+                            badge = if (app.packageName in vpnApps) "VPN" else null,
                             onToggle = {
                                 haptics.select()
                                 viewModel.toggleApp(app.packageName, it)
@@ -299,11 +323,12 @@ fun AppsScreen(viewModel: AppViewModel) {
 }
 
 @Composable
-private fun AppRow(
+internal fun AppRow(
     app: AppEntry,
     checked: Boolean,
     onToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    badge: String? = null,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val scheme = MaterialTheme.colorScheme
@@ -350,6 +375,10 @@ private fun AppRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (badge != null) {
+            Spacer(Modifier.width(8.dp))
+            TagBadge(badge)
+        }
         Spacer(Modifier.width(10.dp))
         SelectionCheck(selected = checked)
     }
@@ -357,7 +386,7 @@ private fun AppRow(
 
 /** Uygulama ikonu — yüklenene kadar baş harfli yer tutucu gösterilir. */
 @Composable
-private fun AppIcon(packageName: String, label: String) {
+internal fun AppIcon(packageName: String, label: String) {
     val bitmap = rememberAppIcon(packageName)
     val shape = RoundedCornerShape(13.dp)
     Box(

@@ -52,6 +52,7 @@ import net.atom.dpibypass.social.ExitProbe
 import net.atom.dpibypass.social.ExitStatusBoard
 import net.atom.dpibypass.social.SocialAccessRuntime
 import net.atom.dpibypass.social.IneligibleCandidate
+import net.atom.dpibypass.wg.WgEngine
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.Socket
@@ -78,6 +79,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     // Yurt dışı çıkış açıkken hev ile ByeDPI arasındaki yönlendirici (bkz. ExitRouter).
     private var exitRouter: ExitRouter? = null
     private var exitProbeJob: Job? = null
+    private var vpnProbeJob: Job? = null
     private val mutex = Mutex()
     // Başlat/durdur komutlarını SIRAYA koyar. Eskiden iki "Bağlan" (ör. Hızlı
     // Panel + bildirim) aynı anda çalışıp birbirinin motorunu kapatıyor, bağlanma
@@ -159,6 +161,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
                 runCatching { TProxyService.TProxyStopService() }
                 runCatching { fd?.close() }
                 runCatching { router?.close() }
+                runCatching { WgEngine.release(WgEngine.OWNER_SERVICE) }
                 runCatching { proxy.stopProxy() }
                 VpnState.update(ConnectionState.Disconnected, null)
             }
@@ -239,6 +242,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             mutex.withLock {
                 VpnState.update(ConnectionState.Connecting)
                 startProxy(currentArgs)
+                syncVpnBridge(settings)
                 startTun2Socks(settings)
                 appliedConfig = TunnelConfig.from(settings)
             }
@@ -283,6 +287,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             try {
                 stopTun2Socks()
                 stopProxy()
+                withContext(Dispatchers.IO) { WgEngine.release(WgEngine.OWNER_SERVICE) }
             } catch (e: Exception) {
                 Log.e(TAG, "Durdurma hatası", e)
             } finally {
@@ -402,6 +407,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
                     currentArgs = VodafoneModePolicy.proxyArgs(currentBaseArgs, currentVodafoneMode)
                     startProxy(currentArgs)
                 }
+                syncVpnBridge(settings)
                 startTun2Socks(settings)
                 appliedConfig = TunnelConfig.from(settings)
                 VpnState.updateVodafoneMode(currentVodafoneMode)
@@ -561,10 +567,27 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         // Yurt dışı çıkış: hev ByeDPI yerine yönlendiriciye bağlanır; yönlendirici
         // platform bağlantılarını yurt dışı sunucuya, gerisini ByeDPI'a iletir.
         val exit = ExitConfig.from(settings)
-        val socksPort = if (exit != null) {
-            exitRouter = ExitRouter(ROUTER_PORT, PROXY_PORT, exit.server, exit.matcher) { Log.w(TAG, it) }.also { it.start() }
+        // VPN Tüneli: seçili uygulamaların UID'leri; yönlendirici bağlantı sahibine göre ayırır.
+        val vpn = VpnTunnelConfig.from(settings)
+        val appUids = vpn?.apps.orEmpty().mapNotNull { pkg ->
+            runCatching { packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull()
+        }.toSet()
+        val routes = ExitRouter.Routes(
+            domainExit = exit?.server,
+            matcher = exit?.matcher ?: net.atom.dpibypass.social.ExitMatcher(emptyList()),
+            appExit = if (appUids.isNotEmpty()) WgEngine.server else null,
+            appUids = appUids,
+            owner = if (appUids.isNotEmpty()) AndroidConnectionOwner(applicationContext) else null,
+        )
+        val useRouter = routes.domainActive || routes.appActive
+        val socksPort = if (useRouter) {
+            exitRouter = ExitRouter(ROUTER_PORT, PROXY_PORT, routes) { Log.w(TAG, it) }.also { it.start() }
             ROUTER_PORT
         } else PROXY_PORT
+        // Yamalı hev, yalnız bu kullanıcı adıyla her oturumun kaynak adresini
+        // yönlendiriciye iletir (uygulama bazlı ayrım için). ByeDPI'a doğrudan
+        // bağlanırken gönderilmez: ByeDPI kimlik doğrulama kabul etmez.
+        val authLines = if (useRouter) "\n  username: 'dpib-src'\n  password: '-'" else ""
         // connect-timeout: SOCKS el sıkışması ByeDPI'ın uzak sunucuya TCP
         // bağlantısını da kapsar; mobil ağda 5 sn'lik varsayılan, oyunun giriş
         // isteklerini zayıf çekimde gereksiz yere düşürüyordu.
@@ -575,7 +598,7 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
             |socks5:
             |  mtu: 8500
             |  address: 127.0.0.1
-            |  port: $socksPort$udpLine
+            |  port: $socksPort$udpLine$authLines
         """.trimMargin()
 
         // Sabit dosya adı: eskiden her bağlanma/yeniden kurulum önbellekte yeni bir
@@ -607,6 +630,8 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     private suspend fun stopTun2Socks() {
         exitProbeJob?.cancel()
         exitProbeJob = null
+        vpnProbeJob?.cancel()
+        vpnProbeJob = null
         val router = exitRouter
         exitRouter = null
         val fd = tunFd
@@ -650,7 +675,9 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
         builder.addRoute("0.0.0.0", 0)
         // Yurt dışı çıkışta IPv6 da tünele alınır: aksi hâlde platform IPv6 üzerinden
         // tünelin yanından geçer ve Türkiye adresini görür.
-        if (VodafoneModePolicy.captureIpv6(settings.vodafoneUnlimitedMode) || ExitConfig.from(settings) != null) {
+        if (VodafoneModePolicy.captureIpv6(settings.vodafoneUnlimitedMode) || ExitConfig.from(settings) != null ||
+            VpnTunnelConfig.from(settings)?.apps?.isNotEmpty() == true
+        ) {
             // IPv6 hotspot'ta ikinci bir kaynak adresi gösterebilir. Tam rota
             // TUN'a girer; ByeDPI -X ile genel IPv6 çıkışını reddeder.
             builder.addAddress("fd00:10:10::10", 128)
@@ -689,7 +716,35 @@ class DpiVpnService : LifecycleVpnService(), AlphaEngine {
     /** Uygulama kapsamı kararı (saf, birim testli: [AppScope]). Kendi paketimiz daima tünel dışında. */
     private fun scopeDecision(settings: Settings): ScopeDecision = AppScope.decide(
         settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, applicationContext.packageName,
+        forced = VpnTunnelConfig.from(settings)?.apps.orEmpty(),
     ) { pkg -> runCatching { packageManager.getApplicationInfo(pkg, 0) }.isSuccess }
+
+    // ---- VPN Tüneli (WireGuard) ----
+
+    /**
+     * WireGuard köprüsünü ayarlara uydurur: gerekiyorsa başlatır (aynı
+     * yapılandırma zaten çalışıyorsa dokunmaz), gerekmiyorsa bırakır. Köprü
+     * kurulamazsa DPI bağlantısı yine açılır; VPN uygulamalarının bağlantıları
+     * Türkiye'den gönderilmez, kapatılır ve hata VPN Tüneli ekranında görünür.
+     */
+    private suspend fun syncVpnBridge(settings: Settings) = withContext(Dispatchers.IO) {
+        vpnProbeJob?.cancel()
+        val vpn = VpnTunnelConfig.from(settings)
+        if (vpn == null || !VpnTunnelConfig.bridgeNeeded(settings)) {
+            WgEngine.release(WgEngine.OWNER_SERVICE)
+            return@withContext
+        }
+        val error = WgEngine.acquire(WgEngine.OWNER_SERVICE, vpn.config) { host -> DohResolver(currentDohUrl).resolve(host) }
+        if (error != null) {
+            Log.w(TAG, "VPN Tüneli: $error")
+            return@withContext
+        }
+        vpnProbeJob = lifecycleScope.launch(Dispatchers.IO) {
+            WgEngine.probed(null)
+            val result = ExitProbe.check(WgEngine.server)
+            if (isActive) WgEngine.probed(result)
+        }
+    }
 
     /** Uygulama ayırma (split tunneling). Kendi paketini daima hariç tut (döngü olmasın). */
     private fun applySplitTunneling(builder: Builder, settings: Settings) {

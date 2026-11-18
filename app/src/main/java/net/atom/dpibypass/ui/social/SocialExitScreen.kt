@@ -84,6 +84,7 @@ import net.atom.dpibypass.ui.design.VSpace
 import net.atom.dpibypass.ui.design.rememberHaptics
 import net.atom.dpibypass.ui.theme.LocalStateColors
 import net.atom.dpibypass.vpn.AppScope
+import net.atom.dpibypass.vpn.VpnTunnelConfig
 
 // ---------------------------------------------------------------------------
 // Sosyal Erişim — e-Devlet doğrulaması olmadan sosyal medya.
@@ -108,7 +109,9 @@ object ExitView {
         if (!settings.exitEnabled) return ExitHeadline.OFF
         val hasTargets = settings.exitPlatforms.isNotEmpty() || settings.exitExtraDomains.isNotBlank()
         if (!hasTargets) return ExitHeadline.NEED_PLATFORMS
-        if (ExitServer.parse(settings.exitServer) == null) return ExitHeadline.NEED_SERVER
+        if (settings.exitViaVpn) {
+            if (VpnTunnelConfig.from(settings) == null) return ExitHeadline.NEED_SERVER
+        } else if (ExitServer.parse(settings.exitServer) == null) return ExitHeadline.NEED_SERVER
         if (connection != ConnectionState.Connected) return ExitHeadline.NEED_CONNECT
         if (!status.running) return ExitHeadline.APPLYING
         return when {
@@ -122,7 +125,8 @@ object ExitView {
     /** Seçili platformların kurulu olup tünel kapsamı DIŞINDA kalan paketleri. */
     fun outOfScope(settings: Settings, installed: Set<String>): Set<String> =
         settings.exitPlatforms.mapNotNull(ExitPlatform::byId).flatMap { it.packages }
-            .filter { it in installed && !AppScope.covers(settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, it) }
+            .filter { it in installed && !AppScope.covers(settings.appFilterMode, settings.selectedApps, settings.vodafoneUnlimitedMode, it,
+                forced = VpnTunnelConfig.from(settings)?.apps.orEmpty()) }
             .toSet()
 
     fun installedPackages(context: Context): Set<String> = ExitPlatform.entries.flatMap { it.packages }
@@ -134,13 +138,17 @@ fun SocialExitScreen(
     viewModel: AppViewModel,
     onConnect: () -> Unit,
     onOpenGuide: () -> Unit,
+    onOpenVpn: () -> Unit = {},
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val connection by viewModel.connectionState.collectAsStateWithLifecycle()
     val status by viewModel.exitStatus.collectAsStateWithLifecycle()
-    val probe by viewModel.exitProbe.collectAsStateWithLifecycle()
+    val proxyProbe by viewModel.exitProbe.collectAsStateWithLifecycle()
+    val vpnProbe by viewModel.vpnProbe.collectAsStateWithLifecycle()
     val checking by viewModel.exitChecking.collectAsStateWithLifecycle()
-    SocialExitContent(settings, connection, status, probe, checking, viewModel, onConnect, onOpenGuide)
+    // Çıkış VPN Tüneli'nden ise ölçülen ülke de onun ölçümüdür.
+    val probe = if (settings.exitViaVpn) vpnProbe else proxyProbe
+    SocialExitContent(settings, connection, status, probe, checking, viewModel, onConnect, onOpenGuide, onOpenVpn)
 }
 
 /** Durumu dışarıdan alan gövde: ekran görüntüsü testleri ayar deposu olmadan çizer. */
@@ -154,6 +162,7 @@ fun SocialExitContent(
     viewModel: AppViewModel,
     onConnect: () -> Unit,
     onOpenGuide: () -> Unit,
+    onOpenVpn: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val haptics = rememberHaptics()
@@ -257,10 +266,43 @@ fun SocialExitContent(
             }
         }
 
-        // ---- 2. Sunucu ----
-        SectionHeader("2 · Yurt dışı sunucu")
+        // ---- 2. Çıkış ----
+        SectionHeader("2 · Yurt dışı çıkış")
         AppCard(modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(Modifier.padding(start = 14.dp, end = 14.dp, top = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SourceTile(
+                        title = "VPN Tüneli",
+                        caption = "Windscribe / Proton VPN",
+                        selected = settings.exitViaVpn,
+                        modifier = Modifier.weight(1f).testTag("exit-source-vpn"),
+                        onClick = { haptics.select(); viewModel.setExitViaVpn(true) },
+                    )
+                    SourceTile(
+                        title = "Kendi sunucum",
+                        caption = "SOCKS5 / HTTP proxy",
+                        selected = !settings.exitViaVpn,
+                        modifier = Modifier.weight(1f).testTag("exit-source-proxy"),
+                        onClick = { haptics.select(); viewModel.setExitViaVpn(false) },
+                    )
+                }
+            }
+            if (settings.exitViaVpn) {
+                val vpn = VpnTunnelConfig.from(settings)
+                ListRow(
+                    title = if (vpn != null) "VPN Tüneli: ${vpn.config.provider.label}" else "VPN Tüneli'ni kur",
+                    subtitle = if (vpn != null) "Seçili platformlar ${vpn.config.endpointDisplay} üzerinden çıkar. Dokun: VPN ayarları, test ve uygulama seçimi."
+                    else "Sunucu barındırman gerekmez: Proton VPN (ücretsiz) ya da Windscribe'ın WireGuard dosyasını ekle. " +
+                        "İki VPN aynı anda çalışmadığı için VPN, DPI Bypass'ın içinde çalışır.",
+                    icon = Icons.Rounded.Public,
+                    iconTint = if (vpn != null) LocalStateColors.current.connected else MaterialTheme.colorScheme.primary,
+                    onClick = onOpenVpn,
+                    modifier = Modifier.testTag("exit-open-vpn"),
+                    trailing = { Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                )
+                probe?.let { Box(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) { ProbeResult(it) } }
+            }
+            if (!settings.exitViaVpn) Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     "Türkiye dışında çalışan bir SOCKS5 ya da HTTP proxy sunucusunun adresi. Kendi sunucun (ör. Almanya'da bir VPS) " +
                         "ya da güvendiğin bir proxy sağlayıcısı olabilir; bu uygulama sunucu vermez.",
@@ -408,7 +450,8 @@ private fun HeroCard(
         ExitHeadline.OFF -> Quad("Kapalı", "Platformlar seni Türkiye'den bağlanıyor görür ve e-Devlet doğrulaması isteyebilir.",
             scheme.onSurfaceVariant, Icons.Rounded.Badge)
         ExitHeadline.NEED_PLATFORMS -> Quad("Platform seç", "Hangi uygulamaların yurt dışından bağlanacağını aşağıda seç.", scheme.primary, Icons.Rounded.Public)
-        ExitHeadline.NEED_SERVER -> Quad("Sunucu gerekli", "Yurt dışındaki proxy sunucunun adresini 2. adımda yaz.", scheme.primary, Icons.Rounded.Dns)
+        ExitHeadline.NEED_SERVER -> if (settings.exitViaVpn) Quad("VPN Tüneli gerekli", "2. adımda Proton VPN ya da Windscribe'ın WireGuard dosyasını ekle.", scheme.primary, Icons.Rounded.Dns)
+        else Quad("Sunucu gerekli", "Yurt dışındaki proxy sunucunun adresini 2. adımda yaz ya da VPN Tüneli'ni seç.", scheme.primary, Icons.Rounded.Dns)
         ExitHeadline.NEED_CONNECT -> Quad("Hazır — bağlan", "Ayarlar tamam. Tünel açılınca seçili platformlar yurt dışından çıkar.", scheme.primary, Icons.Rounded.Shield)
         ExitHeadline.APPLYING -> Quad("Uygulanıyor…", "Tünel yeni ayarla yeniden kuruluyor.", scheme.primary, Icons.Rounded.Refresh)
         ExitHeadline.CHECKING -> Quad("Çıkış ülkesi ölçülüyor…", "Sunucu üzerinden konum kontrol ediliyor.", scheme.primary, Icons.Rounded.Refresh)
@@ -473,6 +516,26 @@ private fun HeroCard(
                 AppButton("Bağlan", onClick = onConnect, icon = Icons.Rounded.Shield, modifier = Modifier.fillMaxWidth().testTag("exit-hero-connect"))
             }
         }
+    }
+}
+
+@Composable
+private fun SourceTile(title: String, caption: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = modifier
+            .heightIn(min = 56.dp)
+            .clip(MaterialTheme.shapes.medium)
+            .background(if (selected) scheme.primary.copy(alpha = 0.14f) else scheme.surfaceContainerHigh.copy(alpha = 0.6f))
+            .clickable(onClick = onClick)
+            .padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = scheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(caption, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 2)
+        }
+        SelectionCheck(selected)
     }
 }
 

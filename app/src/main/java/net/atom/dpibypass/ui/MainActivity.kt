@@ -51,6 +51,9 @@ import net.atom.dpibypass.ui.nav.Dest
 import net.atom.dpibypass.ui.nav.SocialAdvancedRoute
 import net.atom.dpibypass.ui.nav.SocialDiagnosticsRoute
 import net.atom.dpibypass.ui.nav.SocialRoute
+import net.atom.dpibypass.ui.nav.VpnRoute
+import net.atom.dpibypass.ui.vpn.VpnConflictDialog
+import net.atom.dpibypass.ui.vpn.VpnTunnelScreen
 import net.atom.dpibypass.ui.nav.showsDock
 import androidx.navigation.compose.currentBackStackEntryAsState
 import net.atom.dpibypass.ui.onboarding.OnboardingOverlay
@@ -98,7 +101,8 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(LocalHapticsEnabled provides settings.haptics) {
                     AppRoot(
                         viewModel = viewModel,
-                        onConnect = ::connect,
+                        onConnect = { connect() },
+                        onConnectAnyway = { connect(force = true) },
                         onDisconnect = ::disconnect,
                         onRequestTile = ::requestQuickTile,
                         discordInstalled = discordInstalled,
@@ -108,8 +112,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Bağlan: VPN izni gerekiyorsa iste, yoksa doğrudan başlat. */
-    private fun connect() {
+    /**
+     * Bağlan: VPN izni gerekiyorsa iste, yoksa doğrudan başlat. Başka bir VPN
+     * uygulaması (Windscribe, Proton…) açıksa önce sorulur: Android ikisini
+     * aynı anda çalıştırmaz, DPI Bypass açılınca o kapanır.
+     */
+    private fun connect(force: Boolean = false) {
+        if (!force && viewModel.checkVpnConflict()) return
+        viewModel.dismissVpnConflict()
         val prepare = VpnService.prepare(this)
         viewModel.clearVpnPermissionDenied()
         if (prepare != null) {
@@ -154,6 +164,7 @@ class MainActivity : ComponentActivity() {
 private fun AppRoot(
     viewModel: AppViewModel,
     onConnect: () -> Unit,
+    onConnectAnyway: () -> Unit,
     onDisconnect: () -> Unit,
     onRequestTile: () -> Unit,
     discordInstalled: Boolean,
@@ -217,6 +228,20 @@ private fun AppRoot(
                 // okunmadan önceki varsayılan (onboardingDone=false) gerçek değer
                 // sayılmaz: eski kullanıcıya sihirbaz bir an görünüp "Sadece
                 // Discord"a yanlışlıkla dokunulmasına yol açmasın.
+                val conflict by viewModel.vpnConflict.collectAsStateWithLifecycle()
+                conflict?.let { c ->
+                    VpnConflictDialog(
+                        conflict = c,
+                        onConnect = onConnectAnyway,
+                        onSetup = {
+                            viewModel.dismissVpnConflict()
+                            navController.navigate(VpnRoute) { launchSingleTop = true }
+                        },
+                        onDismiss = viewModel::dismissVpnConflict,
+                        onNeverAsk = { viewModel.setVpnConflictAsk(false); onConnectAnyway() },
+                    )
+                }
+
                 if (settings.loaded && !settings.onboardingDone) {
                     OnboardingOverlay(
                         discordInstalled = discordInstalled,
@@ -257,10 +282,24 @@ private fun AppRoot(
                         viewModel = viewModel,
                         onConnect = onConnect,
                         onOpenGuide = { navController.navigate(SocialRoute) { launchSingleTop = true } },
+                        onOpenVpn = { navController.navigate(VpnRoute) { launchSingleTop = true } },
                     )
                 }
                 composable(Dest.Mode.route) { ModeScreen(viewModel) }
-                composable(Dest.Apps.route) { AppsScreen(viewModel) }
+                composable(Dest.Apps.route) { AppsScreen(viewModel, onOpenVpn = { navController.navigate(VpnRoute) { launchSingleTop = true } }) }
+                composable(VpnRoute) {
+                    VpnTunnelScreen(
+                        viewModel = viewModel,
+                        onBack = { if (!navController.popBackStack()) navController.navigate(Dest.Social.route) },
+                        onConnect = onConnect,
+                        onOpenApps = {
+                            navController.navigate(Dest.Apps.route) {
+                                popUpTo(Dest.Home.route)
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
                 composable(Dest.Settings.route) {
                     SettingsScreen(
                         viewModel,

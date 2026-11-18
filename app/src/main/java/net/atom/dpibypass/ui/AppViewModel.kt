@@ -228,6 +228,138 @@ class AppViewModel(app: Application) : AndroidViewModel(app), net.atom.dpibypass
             _exitChecking.value = false
         }
     }
+    // ---- VPN Tüneli (Windscribe / Proton VPN WireGuard) ----
+    val vpnStatus: StateFlow<net.atom.dpibypass.wg.WgStatus> = net.atom.dpibypass.wg.WgEngine.status
+    val vpnProbe: StateFlow<net.atom.dpibypass.social.ExitProbe.Result?> = net.atom.dpibypass.wg.WgEngine.probe
+    val vpnBridgeAvailable: Boolean get() = net.atom.dpibypass.wg.WgNative.available
+
+    fun setVpnTunnelEnabled(v: Boolean) = launch { repo.setVpnTunnelEnabled(v) }
+    fun setVpnConflictAsk(v: Boolean) = launch { repo.setVpnConflictAsk(v) }
+    fun setVpnApp(pkg: String, selected: Boolean) = launch { repo.updateVpnApps { if (selected) it + pkg else it - pkg } }
+    fun clearVpnApps() = launch { repo.updateVpnApps { emptySet() } }
+
+    /** Sosyal Erişim çıkışını VPN Tüneli'ne bağlar (platform seçimi boşsa önerilenleri ekler). */
+    fun setExitViaVpn(v: Boolean) = launch {
+        repo.setExitViaVpn(v)
+        if (v && settings.value.exitPlatforms.isEmpty() && settings.value.exitExtraDomains.isBlank()) {
+            repo.updateExitPlatforms {
+                setOf(net.atom.dpibypass.social.ExitPlatform.INSTAGRAM, net.atom.dpibypass.social.ExitPlatform.X,
+                    net.atom.dpibypass.social.ExitPlatform.TIKTOK, net.atom.dpibypass.social.ExitPlatform.YOUTUBE,
+                    net.atom.dpibypass.social.ExitPlatform.FACEBOOK).map { it.id }.toSet()
+            }
+        }
+    }
+
+    /** Son içe aktarma/yapıştırma sonucu (hata ya da özet); arayüz gösterir. */
+    private val _vpnImportMessage = MutableStateFlow<String?>(null)
+    val vpnImportMessage: StateFlow<String?> = _vpnImportMessage.asStateFlow()
+
+    /**
+     * WireGuard yapılandırmasını doğrular ve kaydeder. Geçersizse kaydetmez,
+     * nedenini döndürür. İlk geçerli yapılandırmada VPN Tüneli açılır.
+     */
+    fun saveVpnConfig(text: String) {
+        when (val r = net.atom.dpibypass.wg.WireGuardConfig.parse(text)) {
+            is net.atom.dpibypass.wg.WireGuardConfig.ParseResult.Error -> _vpnImportMessage.value = r.message
+            is net.atom.dpibypass.wg.WireGuardConfig.ParseResult.Ok -> {
+                _vpnImportMessage.value = "Eklendi: ${r.config.summary}"
+                net.atom.dpibypass.wg.WgEngine.probed(null)
+                launch {
+                    repo.setVpnConfig(text.trim())
+                    repo.setVpnTunnelEnabled(true)
+                }
+            }
+        }
+    }
+
+    fun removeVpnConfig() = launch {
+        repo.setVpnConfig("")
+        repo.setVpnTunnelEnabled(false)
+        net.atom.dpibypass.wg.WgEngine.probed(null)
+        _vpnImportMessage.value = null
+    }
+
+    /** Dosya seçiciden gelen .conf dosyasını okur (en çok 64 KB). */
+    fun importVpnConfig(uri: android.net.Uri) {
+        viewModelScope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                        val out = java.io.ByteArrayOutputStream()
+                        val buf = ByteArray(8192)
+                        while (out.size() < 64 * 1024) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                        }
+                        out.toString("UTF-8")
+                    }
+                }.getOrNull()
+            }
+            if (text == null) _vpnImportMessage.value = "Dosya okunamadı." else saveVpnConfig(text)
+        }
+    }
+
+    private val _vpnChecking = MutableStateFlow(false)
+    val vpnChecking: StateFlow<Boolean> = _vpnChecking.asStateFlow()
+
+    /**
+     * VPN Tüneli'ni dener ve çıkış ülkesini ölçer. DPI bağlantısı kapalıyken de
+     * çalışır: köprü geçici olarak açılır (DPI Bypass kendi tünelinin dışındadır).
+     */
+    fun testVpn() {
+        val config = net.atom.dpibypass.wg.WireGuardConfig.parseOrNull(settings.value.vpnConfig) ?: return
+        if (_vpnChecking.value) return
+        _vpnChecking.value = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val engine = net.atom.dpibypass.wg.WgEngine
+                val doh = settings.value.effectiveDohUrl()
+                val err = engine.acquire(engine.OWNER_TEST, config) { host -> DohResolver(doh).resolve(host) }
+                try {
+                    if (err != null) net.atom.dpibypass.social.ExitProbe.Result(false, error = err)
+                    else net.atom.dpibypass.social.ExitProbe.check(engine.server, timeoutMs = 15_000)
+                } finally {
+                    if (err == null) engine.release(engine.OWNER_TEST)
+                }
+            }
+            net.atom.dpibypass.wg.WgEngine.probed(result)
+            _vpnChecking.value = false
+        }
+    }
+
+    /** VPN ekranı açıkken canlı sayaçları yeniler. */
+    fun refreshVpnStatus() {
+        viewModelScope.launch(Dispatchers.IO) { net.atom.dpibypass.wg.WgEngine.refresh() }
+    }
+
+    // ---- başka bir VPN uygulaması açık mı? ----
+
+    /** Bağlanmadan önce gösterilecek "başka VPN açık" uyarısı. */
+    data class VpnConflict(val apps: List<String>, val tunnelReady: Boolean)
+
+    private val _vpnConflict = MutableStateFlow<VpnConflict?>(null)
+    val vpnConflict: StateFlow<VpnConflict?> = _vpnConflict.asStateFlow()
+    fun dismissVpnConflict() { _vpnConflict.value = null }
+
+    /**
+     * Başka bir VPN (Windscribe, Proton VPN…) açıksa uyarıyı gösterir ve true
+     * döner: Android aynı anda tek VPN'e izin verdiği için DPI Bypass açılınca o
+     * kapanır. Kullanıcı "bu uyarıyı gösterme" dediyse ya da kendi tünelimiz
+     * zaten açıksa false.
+     */
+    fun checkVpnConflict(): Boolean {
+        val s = settings.value
+        if (!s.vpnConflictAsk || connectionState.value == ConnectionState.Connected) return false
+        val app = getApplication<Application>()
+        if (!net.atom.dpibypass.wg.OtherVpn.active(app)) return false
+        _vpnConflict.value = VpnConflict(
+            apps = net.atom.dpibypass.wg.OtherVpn.installedNames(app),
+            tunnelReady = net.atom.dpibypass.vpn.VpnTunnelConfig.from(s) != null,
+        )
+        return true
+    }
+
     fun setSocialAccessMode(v: net.atom.dpibypass.social.TestMode) = launch {
         repo.setSocialAccessMode(v)
         if (v == net.atom.dpibypass.social.TestMode.MANUAL) net.atom.dpibypass.social.SocialAccessRuntime.coordinator.manual()

@@ -73,11 +73,13 @@ enum class Dest(
 const val SocialRoute = "social"
 const val SocialAdvancedRoute = "social/advanced"
 const val SocialDiagnosticsRoute = "social/diagnostics"
+/** VPN Tüneli (Windscribe / Proton WireGuard): Sosyal Erişim sekmesine aittir. */
+const val VpnRoute = "social/vpn"
 
 /** Bir rotanın dock/raydaki sekmesi; alt sayfalar ait oldukları sekmeyi gösterir. */
 fun tabRouteFor(route: String?): String = when (route) {
     null -> Dest.Home.route
-    SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute -> Dest.Social.route
+    SocialRoute, SocialAdvancedRoute, SocialDiagnosticsRoute, VpnRoute -> Dest.Social.route
     else -> route
 }
 

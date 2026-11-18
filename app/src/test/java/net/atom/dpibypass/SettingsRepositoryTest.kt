@@ -36,6 +36,26 @@ class SettingsRepositoryTest {
         return SettingsRepository(PreferenceDataStoreFactory.create(scope = scope) { File(dir, "dpi_settings.preferences_pb") }) { false }
     }
 
+    /** VPN Tüneli anahtarı ana ayar dosyasına (yedeklenen) değil, ayrı dosyaya yazılır. */
+    @Test fun vpnConfigLivesInSeparateSecretStore() = runBlocking {
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob()).also { scopes += it }
+        val main = File(dir, "dpi_settings.preferences_pb")
+        val secret = File(dir, "vpn_secret.preferences_pb")
+        val r = SettingsRepository(
+            PreferenceDataStoreFactory.create(scope = scope) { main },
+            secretStore = PreferenceDataStoreFactory.create(scope = scope) { secret },
+        ) { false }
+        r.setVpnConfig("[Interface]\nPrivateKey = GIZLI-ANAHTAR")
+        r.setVpnTunnelEnabled(true)
+        r.updateVpnApps { it + "com.instagram.android" }
+        val s = r.settings.first()
+        assertEquals("[Interface]\nPrivateKey = GIZLI-ANAHTAR", s.vpnConfig)
+        assertTrue(s.vpnTunnelEnabled)
+        assertEquals(setOf("com.instagram.android"), s.vpnApps)
+        assertFalse(String(main.readBytes()).contains("GIZLI-ANAHTAR"))
+        assertTrue(String(secret.readBytes()).contains("GIZLI-ANAHTAR"))
+    }
+
     @Test fun rapidConcurrentAppTogglesLoseNothing() = runBlocking {
         val r = repo()
         r.setAppFilterMode(AppFilterMode.Include)

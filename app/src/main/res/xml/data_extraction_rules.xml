@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- VPN Tüneli'nin WireGuard özel anahtarı ne buluta ne de cihazdan cihaza aktarılır (Android 12+). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="datastore/vpn_secret.preferences_pb" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/vpn_secret.preferences_pb" />
+    </device-transfer>
+</data-extraction-rules>
